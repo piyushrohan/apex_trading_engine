@@ -1,0 +1,31 @@
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# APEX Data Lake (Ignore massive data files, keep the folders)
+data_lake/apex_market_data.duckdb*
+data_lake/raw_ticks/*
+data_lake/ohlcv/*
+data_lake/features/*
+data_lake/orderflow/*
+
+# Keep data lake structure intact in git
+!data_lake/raw_ticks/.gitkeep
+!data_lake/ohlcv/.gitkeep
+!data_lake/features/.gitkeep
+!data_lake/orderflow/.gitkeep
+
+# Models, Artifacts & Logs
+artifacts/
+models/*.pt
+models/*.pkl
+logs/
+*.log
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store

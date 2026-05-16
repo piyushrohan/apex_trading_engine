@@ -1,0 +1,71 @@
+# APEX System Configuration
+# Phase 1: Core Data & Execution - ETHUSDC 
+
+data:
+  target_symbol: "ETHUSDC"
+  macro_symbol: "BTCUSDC" # Using USDC pair for structural alignment
+  target_interval: "3m"
+  macro_intervals: ["5m", "15m", "30m"]
+  
+  stream_safety_delay_sec: 1.2
+  
+  storage:
+    type: "duckdb"
+    db_path: "data_lake/apex_market_data.duckdb"
+    cache_dir: "data_lake/"
+  
+  urls:
+    vision_base_url: "https://data.binance.vision/data/futures/um"
+    rest_klines:
+      - "https://fapi.binance.com/fapi/v1/klines"
+    ws_stream: "wss://stream.binance.com:9443/stream"
+    ws_userdata: "wss://fstream.binance.com/ws"
+
+environment:
+  initial_capital: 1000
+  
+  # Institutional Zero-Fee Maker Execution
+  transaction_cost_pct: 0.0 # 0% Maker fee on ETHUSDC
+  slippage_k: 0.0 # Strict post-only limit orders
+  slippage_floor: 0.00000 
+  
+  drawdown_penalty_weight: 0.1
+  tail_risk_penalty: 0.1
+  
+  warmup_steps: 80
+  
+  # Time-in-market penalty to force short-term edge execution
+  holding_penalty: 0.0001 
+  
+  flat_reward: 0.0001
+  flat_threshold: 0.40 # Wide deadzone to protect against noise-escape pathology
+  
+  reward_scale: 5.0
+
+funding:
+  enabled: true
+  source: "binance"
+  default_rate: 0.0001
+  interval_hours: 8
+  continuous_approx: true
+
+technicals:
+  rolling_window: 120
+  atr_period: 10
+  
+  ema_fast: 20
+  ema_trend_short: 10
+  ema_trend_long: 50
+  
+  alpha_rsv_period: 6
+  alpha_causality_period: 6
+  macro_vol_z_period: 144
+
+execution:
+  mode: "maker_only"
+  post_only: true
+  chase_tolerance: 3 # Cancel & Replace if price moves X ticks away
+  max_leverage: 3
+  kelly_fraction_cap: 0.3
+
+# (MLOps and PPO blocks will be added in Phase 3)

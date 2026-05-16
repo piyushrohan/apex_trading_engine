@@ -1,0 +1,10 @@
+numpy
+pandas
+pyarrow
+duckdb
+websockets
+ccxt
+torch
+xgboost
+lightgbm
+pyyaml
