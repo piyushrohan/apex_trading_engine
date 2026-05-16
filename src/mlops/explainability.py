@@ -1,6 +1,7 @@
 import json
 import logging
 import numpy as np
+from datetime import datetime, timezone
 from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class ExplainabilityEngine:
                         risk_factors.append(f"{feature_name} opposing bullish conviction ({val:.2f})")
         
         explanation = {
-            "timestamp": pd.Timestamp.utcnow().isoformat() if 'pd' in globals() else "NOW",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "decision": action_str,
             "conviction_score": round(conviction, 4),
             "active_regime": regime,
