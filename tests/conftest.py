@@ -30,39 +30,12 @@ def mock_config():
         }
     }
 
+from tests.fixtures.market_data import generate_liquidity_sweep_klines
+
 @pytest.fixture
 def mock_eth_klines() -> pd.DataFrame:
-    """
-    Deterministic dataset of ETHUSDC candles.
-    Contains artificial patterns:
-    - Index 5: Massive volatility spike (Flash Crash)
-    - Index 8: Liquidity Sweep (long lower wick)
-    """
-    data = {
-        "timestamp": pd.date_range("2026-05-16 12:00:00", periods=20, freq="3min"),
-        "open": np.linspace(3000, 3100, 20),
-        "high": np.linspace(3010, 3110, 20),
-        "low": np.linspace(2990, 3090, 20),
-        "close": np.linspace(3005, 3105, 20),
-        "volume": np.random.RandomState(42).uniform(100, 500, 20),
-        "taker_buy_volume": np.random.RandomState(42).uniform(50, 250, 20),
-    }
-    df = pd.DataFrame(data)
-    
-    # Inject Flash Crash
-    df.loc[5, 'low'] = 2800.0
-    df.loc[5, 'high'] = 3050.0
-    df.loc[5, 'close'] = 2850.0
-    df.loc[5, 'volume'] = 5000.0
-    
-    # Inject Liquidity Sweep (Long Lower Wick, strong close)
-    df.loc[8, 'open'] = 3020.0
-    df.loc[8, 'close'] = 3030.0
-    df.loc[8, 'high'] = 3035.0
-    df.loc[8, 'low'] = 2950.0 # Deep sweep
-    df.loc[8, 'volume'] = 2000.0
-    
-    return df
+    """Deterministic dataset of ETHUSDC candles."""
+    return generate_liquidity_sweep_klines()
 
 @pytest.fixture
 def mock_btc_klines() -> pd.DataFrame:

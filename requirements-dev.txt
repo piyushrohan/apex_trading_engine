@@ -1,0 +1,13 @@
+pytest
+pytest-cov
+pytest-asyncio
+pytest-mock
+pytest-xdist
+mypy
+bandit
+safety
+flake8
+black
+ruff
+isort
+pre-commit
