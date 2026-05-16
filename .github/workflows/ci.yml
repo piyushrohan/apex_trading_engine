@@ -24,7 +24,7 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Bandit Security Scan
         run: bandit -r src/ -ll -ii
       - name: Safety Dependency Scan
@@ -44,7 +44,7 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Mypy Check
         # Phase 1: Not enforcing strict yet
         run: mypy src/ --ignore-missing-imports || true
@@ -61,7 +61,7 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Run Risk & Kill-Switch Tests
         run: pytest tests/ -v -m "risk"
 
@@ -77,7 +77,7 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt
         
       - name: Run Core Logic Tests
         run: pytest tests/ -v -m "unit or integration or mlops or chaos"

@@ -1,0 +1,30 @@
+{
+  "version": "1.0.0",
+  "description": "Deterministic historical replay datasets for APEX trading engine testing.",
+  "fixtures": {
+    "flash_crash_klines": {
+      "description": "Massive volatility spike simulating a flash crash.",
+      "anomaly_index": 5,
+      "anomaly_details": {
+        "low": 2800.0,
+        "volume": 5000.0
+      }
+    },
+    "liquidity_sweep_klines": {
+      "description": "Deep buy-side liquidity sweep simulating stop hunts.",
+      "anomaly_index": 8,
+      "anomaly_details": {
+        "low": 2950.0,
+        "volume": 2000.0
+      }
+    },
+    "chop_compression_data": {
+      "description": "Low volatility regime data.",
+      "volatility_zscore": -1.5
+    },
+    "trend_data": {
+      "description": "Strong trend regime data.",
+      "trend_slope": "positive"
+    }
+  }
+}

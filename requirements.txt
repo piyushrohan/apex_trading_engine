@@ -8,11 +8,3 @@ torch
 xgboost
 lightgbm
 pyyaml
-pytest
-pytest-cov
-pytest-asyncio
-pytest-mock
-mypy
-bandit
-safety
-flake8
