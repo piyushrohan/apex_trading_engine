@@ -1,0 +1,22 @@
+name: APEX Paper Trading Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: 'Duration to run paper trading'
+        required: true
+        default: '24'
+
+jobs:
+  paper-trading:
+    name: Binance Testnet Paper Trading
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Testnet
+        run: echo "Future integration: Deploying to Binance Testnet using isolated secrets..."
+      - name: Telemetry Generation
+        run: echo "Generating trade journals and telemetry artifacts..."
+      - name: Archive Trade Journals
+        run: echo "Archiving trade journals for reconciliation validation..."

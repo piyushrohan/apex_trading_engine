@@ -2,6 +2,7 @@ import pytest
 import os
 from src.mlops.registry import ModelRegistry
 
+@pytest.mark.integration
 def test_registry_state_transitions(tmp_path):
     """
     Integration Test:

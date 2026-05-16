@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 from src.mlops.evaluator import ModelEvaluator
 
+@pytest.mark.mlops
 def test_evaluator_rejects_insufficient_trades(mock_config):
     """Test that the evaluator rejects models with too few trades."""
     evaluator = ModelEvaluator(mock_config)
@@ -14,6 +15,7 @@ def test_evaluator_rejects_insufficient_trades(mock_config):
     assert metrics["sharpe"] == 0.0
     assert metrics["max_drawdown"] == 1.0
 
+@pytest.mark.mlops
 def test_evaluator_calculates_metrics_correctly(mock_config, mock_trade_history):
     """Test that Sharpe, Drawdown, and Win Rate are mathematically correct."""
     evaluator = ModelEvaluator(mock_config)
@@ -39,6 +41,7 @@ def test_evaluator_calculates_metrics_correctly(mock_config, mock_trade_history)
     # But we mainly care the math executed cleanly.
     assert isinstance(metrics["passed_safety"], bool)
 
+@pytest.mark.mlops
 def test_evaluator_rejects_high_drawdown(mock_config, mock_trade_history):
     """Verify that a model violating the 10% max drawdown limit fails safety."""
     evaluator = ModelEvaluator(mock_config)

@@ -3,6 +3,7 @@ from src.execution.risk_engine import RiskEngine
 from src.data.feature_engine import FeatureEngine
 from src.models.regime_detector import RegimeDetector
 
+@pytest.mark.risk
 def test_risk_flash_crash_survival(mock_config, mock_eth_klines):
     """
     Risk Catastrophe Test:
@@ -24,6 +25,7 @@ def test_risk_flash_crash_survival(mock_config, mock_eth_klines):
     assert df_regime['volatility_zscore'].iloc[-1] > 1.5
     assert df_regime['regime_str'].iloc[-1] == "VOLATILITY_EXPANSION"
 
+@pytest.mark.chaos
 def test_chaos_invalid_payload(mock_config):
     """
     Chaos Test:

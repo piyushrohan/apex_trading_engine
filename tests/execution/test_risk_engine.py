@@ -1,6 +1,7 @@
 import pytest
 from src.execution.risk_engine import RiskEngine
 
+@pytest.mark.risk
 def test_risk_engine_kelly_sizing(mock_config):
     """Verify Kelly Criterion calculates optimal fraction accurately."""
     engine = RiskEngine(mock_config)
@@ -13,6 +14,7 @@ def test_risk_engine_kelly_sizing(mock_config):
     
     assert round(fraction, 4) == 0.0875
 
+@pytest.mark.risk
 def test_risk_engine_kill_switch(mock_config):
     """
     Risk Catastrophe Test: Verify that exceeding the maximum drawdown 
@@ -29,6 +31,7 @@ def test_risk_engine_kill_switch(mock_config):
     # The Kill Switch must override everything
     assert fraction == 0.0
 
+@pytest.mark.risk
 def test_risk_engine_leverage_cap(mock_config):
     """Verify approve_order respects the hard max_leverage constraint."""
     engine = RiskEngine(mock_config)

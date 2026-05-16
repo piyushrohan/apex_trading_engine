@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 from src.data.feature_engine import FeatureEngine
 
+@pytest.mark.unit
 def test_feature_engine_calculates_cvd(mock_config, mock_eth_klines):
     """Verify Cumulative Volume Delta (CVD) mathematically matches orderflow imbalance."""
     engine = FeatureEngine(mock_config)
@@ -17,6 +18,7 @@ def test_feature_engine_calculates_cvd(mock_config, mock_eth_klines):
     
     assert round(df.loc[0, 'net_volume'], 4) == round(expected_net, 4)
 
+@pytest.mark.unit
 def test_feature_engine_liquidity_sweep_detection(mock_config, mock_eth_klines):
     """
     Data Integrity Test: Verify that abnormal candle patterns 
@@ -29,6 +31,7 @@ def test_feature_engine_liquidity_sweep_detection(mock_config, mock_eth_klines):
     # Index 8 was injected as a Buy Liquidity Sweep in the fixture
     assert df.loc[8, 'is_buy_liquidity_sweep'] == True
 
+@pytest.mark.chaos
 def test_feature_engine_handles_missing_data(mock_config, mock_eth_klines):
     """
     Data Integrity Test / Chaos Test: 

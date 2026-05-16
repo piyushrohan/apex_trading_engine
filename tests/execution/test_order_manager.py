@@ -14,6 +14,7 @@ def mock_rest_client():
     return client
 
 @pytest.mark.asyncio
+@pytest.mark.unit
 async def test_order_manager_enforces_maker_only(mock_config, mock_rest_client):
     """
     Verify that OrderManager absolutely enforces timeInForce='GTX' 
@@ -35,6 +36,7 @@ async def test_order_manager_enforces_maker_only(mock_config, mock_rest_client):
     )
 
 @pytest.mark.asyncio
+@pytest.mark.unit
 async def test_order_manager_handles_api_failure(mock_config, mock_rest_client):
     """
     Chaos Test: Verify that OrderManager gracefully handles Binance API exceptions 
