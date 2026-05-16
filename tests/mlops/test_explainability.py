@@ -2,6 +2,7 @@ import pytest
 import os
 from src.mlops.explainability import ExplainabilityEngine
 
+@pytest.mark.mlops
 def test_explainability_no_silent_trades(mock_config, tmp_path):
     """
     Verify that every trade decision includes reasoning, confidence decomposition,

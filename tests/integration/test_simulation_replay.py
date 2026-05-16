@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 from src.pipelines.backtest import BacktestEngine
 
+@pytest.mark.replay
 def test_historical_replay_simulation(mock_config):
     """
     Layer 3 Simulation/Replay Test:

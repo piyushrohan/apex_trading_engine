@@ -1,4 +1,4 @@
-name: APEX Continuous Integration
+name: APEX Institutional Pipeline
 
 on:
   push:
@@ -8,44 +8,89 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test-and-lint:
+  security-and-lint:
+    name: Code & Dependency Security
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 5
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Bandit Security Scan
+        run: bandit -r src/ -ll -ii
+      - name: Safety Dependency Scan
+        # Phase 1 targeted ignore: allowing temporarily while we upgrade numpy/pandas
+        run: safety check -r requirements.txt || true
+      - name: Flake8 Linting
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-        cache: 'pip'
+  typecheck:
+    name: Mypy Strict Typechecking
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Mypy Check
+        # Phase 1: Not enforcing strict yet
+        run: mypy src/ --ignore-missing-imports || true
 
-    - name: Install Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+  risk-engine-gate:
+    name: 🚨 Risk Engine Safety Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    needs: [security-and-lint, typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Risk & Kill-Switch Tests
+        run: pytest tests/ -v -m "risk"
 
-    - name: Dependency Security Scan (safety)
-      run: |
-        safety check -r requirements.txt || echo "Ignoring safety errors for now"
-
-    - name: Code Security Scan (bandit)
-      run: |
-        bandit -r src/ -ll -ii
-
-    - name: Lint with flake8
-      run: |
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-
-    - name: Type Check (mypy)
-      run: |
-        mypy src/ --ignore-missing-imports || echo "Ignoring mypy strict errors for now"
-
-    - name: Run Unit Tests & Coverage
-      run: |
-        # Run pytest with coverage. Enforcing 85% overall, and 95% on core modules.
-        # We will build up to this strict enforcement.
-        pytest tests/ -v --cov=src --cov-fail-under=85 --cov-report=term-missing
+  core-tests:
+    name: Core Unit & Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: risk-engine-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        
+      - name: Run Core Logic Tests
+        run: pytest tests/ -v -m "unit or integration or mlops or chaos"
+        
+      - name: Granular Coverage Enforcement (Execution/Risk)
+        run: pytest tests/ -m "unit or risk" --cov=src/execution --cov-fail-under=95
+        
+      - name: Global Coverage Enforcement
+        run: pytest tests/ -v --cov=src --cov-fail-under=85 --cov-report=xml
+        
+      - name: Upload Coverage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7

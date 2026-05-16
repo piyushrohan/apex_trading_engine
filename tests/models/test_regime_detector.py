@@ -2,6 +2,7 @@ import pytest
 import pandas as pd
 from src.models.regime_detector import RegimeDetector
 
+@pytest.mark.unit
 def test_regime_detector_chop_compression(mock_config):
     """Test that low volatility and zero trend correctly tags CHOP_COMPRESSION."""
     detector = RegimeDetector(mock_config)
@@ -17,6 +18,7 @@ def test_regime_detector_chop_compression(mock_config):
     assert result['regime_str'].iloc[-1] == "CHOP_COMPRESSION"
     assert result['regime_id'].iloc[-1] == detector.REGIMES.index("CHOP_COMPRESSION")
 
+@pytest.mark.unit
 def test_regime_detector_volatility_expansion(mock_config):
     """Test that high volatility z-score triggers VOLATILITY_EXPANSION regardless of trend."""
     detector = RegimeDetector(mock_config)
@@ -30,6 +32,7 @@ def test_regime_detector_volatility_expansion(mock_config):
     
     assert result['regime_str'].iloc[-1] == "VOLATILITY_EXPANSION"
 
+@pytest.mark.unit
 def test_regime_detector_strong_trend_up(mock_config):
     """Test that positive trend slope and normal volatility yields STRONG_TREND_UP."""
     detector = RegimeDetector(mock_config)

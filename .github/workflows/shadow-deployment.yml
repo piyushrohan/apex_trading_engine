@@ -1,0 +1,15 @@
+name: APEX Shadow Deployment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  shadow-deploy:
+    name: Deploy Shadow Model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull Latest Shadow Model
+        run: echo "Future integration: Pulling latest SHADOW model from ModelRegistry..."
+      - name: Docker Deployment
+        run: echo "Deploying shadow execution container in parallel to production..."

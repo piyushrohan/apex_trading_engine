@@ -1,0 +1,19 @@
+name: APEX Model Evaluation Pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 1 * * *' # Runs 1 hour after nightly validation
+
+jobs:
+  evaluate-models:
+    name: Model Evaluation & Benchmarking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rolling Retraining
+        run: echo "Future integration: Triggering rolling retraining pipeline..."
+      - name: Walk-Forward Validation
+        run: echo "Running walk-forward validation and drift analysis..."
+      - name: Promotion Scoring
+        run: echo "Generating model promotion reports. Explicit safety gates required for PROD."

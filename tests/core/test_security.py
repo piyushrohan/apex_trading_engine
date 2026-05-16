@@ -3,6 +3,7 @@ import os
 from cryptography.fernet import Fernet
 from src.core.security import SecurityManager
 
+@pytest.mark.unit
 def test_security_manager_encryption_cycle(tmp_path):
     """
     Test that the SecurityManager successfully encrypts and decrypts 
