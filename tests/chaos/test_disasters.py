@@ -11,6 +11,12 @@ def test_risk_flash_crash_survival(mock_config, mock_eth_klines):
     break the mathematical feature engine and immediately forces 
     the regime detector into Volatility Expansion mode to protect capital.
     """
+    # Use tiny rolling windows to avoid NaN results on the 6 row fixture
+    mock_config['technicals'] = {
+        'atr_period': 2,
+        'macro_vol_z_period': 3,
+        'rolling_window': 3
+    }
     feature_engine = FeatureEngine(mock_config)
     regime_detector = RegimeDetector(mock_config)
     
