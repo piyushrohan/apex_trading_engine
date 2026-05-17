@@ -1,32 +1,37 @@
 import asyncio
 import logging
-from typing import Dict, Any
+from typing import Any, Dict
 
-from src.models.meta_controller import MetaController
 from src.mlops.registry import ModelRegistry
+from src.models.meta_controller import MetaController
+
 # ... other imports similar to live_trade.py
 
 logger = logging.getLogger(__name__)
 
+
 class ShadowTradePipeline:
     """
     Parallel Paper-Trading Execution Loop.
-    Loads the active SHADOW model and feeds it the exact same live tick/feature data 
-    as the PROD model. Instead of sending orders to Binance, it simulates fills 
+    Loads the active SHADOW model and feeds it the exact same live tick/feature data
+    as the PROD model. Instead of sending orders to Binance, it simulates fills
     locally using the live Best Bid/Offer (BBO) to prove live edge before promotion.
     """
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.registry = ModelRegistry()
-        
+
         shadow_model_id = self.registry.registry_data.get("active_shadow")
         if not shadow_model_id:
             logger.warning("No SHADOW model found. Shadow pipeline sleeping.")
-            
+
         # In reality, load weights for shadow model into a dedicated MetaController
         self.meta_controller = MetaController(config)
-        self.virtual_equity = config.get('environment', {}).get('initial_capital', 1000.0)
-        
+        self.virtual_equity = config.get("environment", {}).get(
+            "initial_capital", 1000.0
+        )
+
         self._running = False
 
     async def start(self):
@@ -42,21 +47,25 @@ class ShadowTradePipeline:
         """
         while self._running:
             try:
-                await asyncio.sleep(3.0) # Mock micro-batch delay
-                
+                await asyncio.sleep(3.0)  # Mock micro-batch delay
+
                 # Assume we receive live state vector and regime from the event bus
                 state_vector = [0.1] * 10
                 regime = "MEAN_REVERSION"
-                bbo = 3500.50
-                
-                action, conviction, context = self.meta_controller.get_action(state_vector, regime)
-                
+
+                action, conviction, context = self.meta_controller.get_action(
+                    state_vector, regime
+                )
+
                 if action != 1:
                     side = "BUY" if action == 2 else "SELL"
-                    logger.debug(f"[SHADOW] Virtual {side} proposed. Conviction: {conviction:.2f}")
+                    logger.debug(
+                        f"[SHADOW] Virtual {side} proposed. "
+                        f"Conviction: {conviction:.2f}"
+                    )
                     # Simulate order placement at BBO and track virtual PnL here
-                    # If virtual PnL over N trades beats PROD, registry.py promotes this to PROD.
-                    
+                    # Promote if virtual PnL over N trades beats PROD.
+
             except asyncio.CancelledError:
                 break
             except Exception as e:

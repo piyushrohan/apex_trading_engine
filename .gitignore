@@ -29,3 +29,7 @@ logs/
 .vscode/
 .idea/
 .DS_Store
+
+# Local Testing
+.coverage
+htmlcov/
