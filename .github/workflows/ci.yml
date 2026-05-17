@@ -1,9 +1,6 @@
 name: APEX Institutional Pipeline
 
 on:
-  push:
-    branches:
-      - dev
   pull_request:
     branches:
       - main
