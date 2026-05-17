@@ -8,7 +8,7 @@ from src.execution.position_sync import AccountSynchronizer
 
 
 @pytest.mark.asyncio
-@pytest.mark.integration
+@pytest.mark.unit
 async def test_account_synchronizer_does_not_start_without_listen_key():
     """Verify account sync stays stopped when Binance cannot issue a listen key."""
     rest_client = AsyncMock()
@@ -22,7 +22,7 @@ async def test_account_synchronizer_does_not_start_without_listen_key():
 
 
 @pytest.mark.asyncio
-@pytest.mark.integration
+@pytest.mark.unit
 async def test_account_synchronizer_start_creates_background_tasks(monkeypatch):
     """Verify successful start stores the listen key and creates worker tasks."""
     rest_client = AsyncMock()
@@ -49,7 +49,7 @@ async def test_account_synchronizer_start_creates_background_tasks(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.integration
+@pytest.mark.unit
 async def test_account_synchronizer_keepalive_loop_pings_until_cancelled(monkeypatch):
     """Verify keepalive loop pings Binance while the synchronizer is running."""
     rest_client = AsyncMock()
@@ -111,7 +111,7 @@ class FakeAioHTTPSession:
 
 
 @pytest.mark.asyncio
-@pytest.mark.integration
+@pytest.mark.unit
 async def test_account_synchronizer_websocket_loop_routes_and_refreshes(monkeypatch):
     """Verify websocket loop routes messages and refreshes the listen key."""
     rest_client = AsyncMock()
@@ -143,7 +143,7 @@ async def test_account_synchronizer_websocket_loop_routes_and_refreshes(monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.integration
+@pytest.mark.unit
 async def test_account_synchronizer_websocket_loop_backs_off_on_errors(monkeypatch):
     """Verify websocket loop catches connection errors and backs off."""
     rest_client = AsyncMock()
@@ -165,7 +165,7 @@ async def test_account_synchronizer_websocket_loop_backs_off_on_errors(monkeypat
     rest_client.get_listen_key.assert_not_called()
 
 
-@pytest.mark.integration
+@pytest.mark.unit
 def test_account_synchronizer_handles_account_and_order_events():
     """Verify user-data stream events update balances, positions, and orders."""
     sync = AccountSynchronizer(AsyncMock())
@@ -216,7 +216,7 @@ def test_account_synchronizer_handles_account_and_order_events():
 
 
 @pytest.mark.asyncio
-@pytest.mark.integration
+@pytest.mark.unit
 async def test_account_synchronizer_routes_events_and_stops():
     """Verify event routing and graceful stop cleanup."""
     rest_client = AsyncMock()
