@@ -1,18 +1,18 @@
 import json
 import logging
-import numpy as np
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Any, Dict
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
 class ExplainabilityEngine:
     """
-    Translates mathematical model inferences (PPO gradients/attention or GBM SHAP values)
-    into human-readable JSON payloads. This provides 'X-ray vision' into the AI's 
-    decision-making process.
+    Translates model inferences into human-readable JSON payloads.
     """
-    
+
     # Map index in the state vector to a human-readable feature name
     FEATURE_MAP = [
         "Price Momentum",
@@ -24,46 +24,52 @@ class ExplainabilityEngine:
         "ETH/BTC Spread Z-Score",
         "ATR Volatility",
         "Volatility Expansion Z-Score",
-        "Trend Slope"
+        "Trend Slope",
     ]
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.trade_journal_path = "data_lake/trade_journal.jsonl"
 
-    def decode_decision(self, action: int, conviction: float, context: Dict[str, Any]) -> Dict[str, Any]:
+    def decode_decision(
+        self, action: int, conviction: float, context: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
-        Takes raw context from the Meta-Controller and converts it into a 
+        Takes raw context from the Meta-Controller and converts it into a
         structured explanation payload.
         """
         action_str = {0: "SHORT", 1: "FLAT", 2: "LONG"}.get(action, "UNKNOWN")
         regime = context.get("active_regime", "UNKNOWN")
         model = context.get("selected_by_meta", "UNKNOWN")
-        
+
         feature_contributions = context.get("feature_contributions", [])
-        
+
         # Sort features by absolute contribution magnitude to find the top drivers
         sorted_indices = np.argsort(np.abs(feature_contributions))[::-1]
-        
+
         reasons = []
         risk_factors = []
-        
-        for idx in sorted_indices[:3]: # Top 3 driving features
+
+        for idx in sorted_indices[:3]:  # Top 3 driving features
             if idx < len(self.FEATURE_MAP):
                 feature_name = self.FEATURE_MAP[idx]
                 val = feature_contributions[idx]
-                
+
                 if val > 0:
                     if action == 2:
                         reasons.append(f"{feature_name} aligned bullishly (+{val:.2f})")
                     elif action == 0:
-                        risk_factors.append(f"{feature_name} opposing bearish conviction (+{val:.2f})")
+                        risk_factors.append(
+                            f"{feature_name} opposing bearish conviction (+{val:.2f})"
+                        )
                 elif val < 0:
                     if action == 0:
                         reasons.append(f"{feature_name} aligned bearishly ({val:.2f})")
                     elif action == 2:
-                        risk_factors.append(f"{feature_name} opposing bullish conviction ({val:.2f})")
-        
+                        risk_factors.append(
+                            f"{feature_name} opposing bullish conviction ({val:.2f})"
+                        )
+
         explanation = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "decision": action_str,
@@ -72,9 +78,9 @@ class ExplainabilityEngine:
             "executing_model": model,
             "primary_reasons": reasons,
             "risk_factors": risk_factors,
-            "raw_action_probs": context.get("action_probs", [])
+            "raw_action_probs": context.get("action_probs", []),
         }
-        
+
         self._log_to_journal(explanation)
         return explanation
 

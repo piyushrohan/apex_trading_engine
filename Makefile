@@ -24,12 +24,12 @@ coverage:
 	pytest --cov=src --cov-report=html --cov-report=term-missing
 
 lint:
-	ruff check .
-	flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+	ruff check src tests
+	flake8 src tests --count --select=E9,F63,F7,F82 --show-source --statistics
 
 format:
-	black .
-	isort .
+	black src tests
+	isort src tests
 
 typecheck:
 	mypy src/ --ignore-missing-imports || echo "Mypy warnings found. Run with strictness locally."
