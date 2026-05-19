@@ -243,9 +243,11 @@ class ShadowLaneRunner:
                     side=side,
                     quantity=qty,
                     price=mark_price - 0.01 if side == "BUY" else mark_price + 0.01,
-                    position_side=position_side
-                    if self.portfolio.position_mode == "hedge"
-                    else None,
+                    position_side=(
+                        position_side
+                        if self.portfolio.position_mode == "hedge"
+                        else None
+                    ),
                 )
             )
 

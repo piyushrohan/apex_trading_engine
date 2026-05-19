@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from src.pipelines import live_trade
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -63,3 +65,44 @@ def test_live_trade_cli_entrypoint_handles_keyboard_interrupt(tmp_path, monkeypa
     )
 
     assert calls["count"] == 1
+
+
+@pytest.mark.integration
+def test_live_trade_build_pipeline_loads_config(monkeypatch):
+    loaded = {"path": None}
+
+    class FakeLivePipeline:
+        def __init__(self, config):
+            self.config = config
+
+    def fake_load_config(path):
+        loaded["path"] = path
+        return {"execution": {"operator_mode": "paper"}}
+
+    monkeypatch.setattr(live_trade, "load_config", fake_load_config)
+    monkeypatch.setattr(live_trade, "LiveTradePipeline", FakeLivePipeline)
+
+    pipeline = live_trade.build_pipeline("custom.yaml")
+
+    assert loaded["path"] == "custom.yaml"
+    assert pipeline.config["execution"]["operator_mode"] == "paper"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_live_trade_main_stops_on_keyboard_interrupt(monkeypatch):
+    events = []
+
+    class FakePipeline:
+        async def start(self):
+            events.append("start")
+            raise KeyboardInterrupt
+
+        async def stop(self):
+            events.append("stop")
+
+    monkeypatch.setattr(live_trade, "build_pipeline", lambda path: FakePipeline())
+
+    await live_trade.main("custom.yaml")
+
+    assert events == ["start", "stop"]

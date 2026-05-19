@@ -10,8 +10,11 @@ from src.execution.live_gate import (
 
 
 @pytest.mark.unit
-def test_paper_gate_fails_without_snapshots(mock_config):
+def test_paper_gate_fails_without_snapshots(mock_config, tmp_path):
+    mock_config["data"]["storage"] = {"db_path": str(tmp_path / "empty_gate.duckdb")}
+
     result = evaluate_paper_gate(mock_config)
+
     assert result.passed is False
     assert any("snapshots" in r for r in result.reasons)
 
@@ -52,9 +55,11 @@ def test_validate_live_startup_requires_enabled(mock_config):
 
 
 @pytest.mark.unit
-def test_validate_live_startup_blocks_failed_paper_gate(mock_config):
+def test_validate_live_startup_blocks_failed_paper_gate(mock_config, tmp_path):
+    mock_config["data"]["storage"] = {"db_path": str(tmp_path / "blocked_gate.duckdb")}
     mock_config["live"] = {"enabled": True, "skip_paper_gate": False}
     mock_config.setdefault("paper", {})["min_days"] = 30
+
     with pytest.raises(RuntimeError, match="paper gate"):
         validate_live_startup(mock_config)
 

@@ -82,3 +82,72 @@ def test_binance_websocket_init_normalizes_symbols(ws_config):
     assert ws.macro_symbol == "btcusdc"
     names = ws.stream_names()
     assert any("markPrice" in n for n in names)
+    assert ws._handle_message({"stream": "noop"}) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_binance_websocket_timeout_and_cancel_paths(ws_config, monkeypatch):
+    class IdleWebSocket:
+        async def recv(self):
+            return "{}"
+
+    class IdleContext:
+        async def __aenter__(self):
+            return IdleWebSocket()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    stop = asyncio.Event()
+    waits = {"count": 0}
+
+    async def fake_wait_for(awaitable, timeout):
+        awaitable.close()
+        waits["count"] += 1
+        stop.set()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(binance_ws.websockets, "connect", lambda url: IdleContext())
+    monkeypatch.setattr(binance_ws.asyncio, "wait_for", fake_wait_for)
+
+    await BinanceWebSocket(ws_config).run_until_stopped(stop)
+
+    assert waits["count"] == 1
+
+    async def cancelled_run(stop_event):
+        raise asyncio.CancelledError
+
+    class CancelContext:
+        async def __aenter__(self):
+            raise asyncio.CancelledError
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    stop.clear()
+    monkeypatch.setattr(binance_ws.websockets, "connect", lambda url: CancelContext())
+    await BinanceWebSocket(ws_config, on_message=cancelled_run).run_until_stopped(stop)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_binance_websocket_legacy_connect_sets_stop_on_cancel(
+    ws_config, monkeypatch
+):
+    events = []
+
+    async def fake_run_until_stopped(self, stop_event):
+        events.append(("run", stop_event.is_set()))
+        await stop_event.wait()
+        events.append(("stopped", stop_event.is_set()))
+
+    async def fake_sleep(_):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(BinanceWebSocket, "run_until_stopped", fake_run_until_stopped)
+    monkeypatch.setattr(binance_ws.asyncio, "sleep", fake_sleep)
+
+    await BinanceWebSocket(ws_config).connect()
+
+    assert events[-1] == ("stopped", True)

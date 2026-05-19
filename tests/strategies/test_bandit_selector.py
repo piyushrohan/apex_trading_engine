@@ -128,3 +128,128 @@ def test_orchestrator_uses_bandit_after_gate_and_logs_rule_scores(
         "signal_disagreement",
         "protective_hedge",
     }
+
+
+@pytest.mark.unit
+def test_bandit_selector_empty_and_missing_rule_score_paths(tmp_path):
+    config = {
+        "hedge": {"bandit": {"state_path": str(tmp_path / "state.json")}},
+        "shadow": {"decision_log_path": str(tmp_path / "decisions.jsonl")},
+    }
+    empty = ContextualBanditSelector(config, [])
+    assert empty.is_eligible() is False
+
+    selector = ContextualBanditSelector(config, ["protective_hedge"])
+    assert selector.select_arm(_ctx(), {}) == (None, {}, False)
+    assert selector.select_arm(_ctx(), {"maker_grid_hedge": 0.7}) == (None, {}, False)
+
+    selector.record_reward("missing", _ctx(), 1.0)
+    assert not (tmp_path / "state.json").exists()
+
+
+@pytest.mark.unit
+def test_bandit_record_reward_persists_state_and_detects_tie(tmp_path):
+    config = {
+        "hedge": {
+            "bandit": {
+                "exploration_factor": 0.0,
+                "state_path": str(tmp_path / "state.json"),
+                "min_decisions": 1,
+            }
+        },
+        "shadow": {"decision_log_path": str(tmp_path / "decisions.jsonl")},
+    }
+    selector = ContextualBanditSelector(config, ["a", "b"])
+
+    arm, scores, exploration = selector.select_arm(_ctx(), {"a": 0.2, "b": 0.3})
+    assert arm in {"a", "b"}
+    assert set(scores) == {"a", "b"}
+    assert exploration is True
+
+    selector.record_reward("a", _ctx(), 0.75)
+
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert selector.counts["a"] == 1
+    assert state["counts"]["a"] == 1
+    assert len(state["a"]["a"]) == selector.dim
+
+
+@pytest.mark.unit
+def test_bandit_reward_log_updates_valid_rows_only(tmp_path):
+    decisions = tmp_path / "decisions.jsonl"
+    decisions.write_text(
+        "\n"
+        + json.dumps({"hedge": {"selected": "missing"}, "hedge_reward": 1.0})
+        + "\n"
+        + json.dumps({"hedge": {"selected": "a"}})
+        + "\n"
+        + json.dumps(
+            {
+                "symbol": "ETHUSDC",
+                "regime": "CHOP_COMPRESSION",
+                "mark_price": 3510.0,
+                "action": 2,
+                "hedge": {"selected": "a", "candidates": {"a": 0.8}},
+                "hedge_reward": 0.25,
+                "bandit_context": {
+                    "ppo_action_probs": [0.1, 0.2, 0.7],
+                    "gbm_action_probs": [0.7, 0.2, 0.1],
+                    "primary_action": 2,
+                    "primary_size_fraction": 0.3,
+                    "volatility_zscore": 5.0,
+                    "funding_rate": 0.001,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = {
+        "hedge": {
+            "bandit": {"state_path": str(tmp_path / "state.json"), "min_decisions": 1}
+        },
+        "shadow": {"decision_log_path": str(decisions)},
+    }
+
+    selector = ContextualBanditSelector(config, ["a"])
+
+    assert selector.total_observations == 3
+    assert selector.update_from_reward_log() == 1
+    assert selector.counts["a"] == 2
+
+
+@pytest.mark.unit
+def test_bandit_load_state_restores_counts_and_matrices(tmp_path):
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "counts": {"a": 4},
+                "a": {"a": [[2, 0, 0, 0, 0, 0]] * 6},
+                "b": {"a": [1, 2, 3, 4, 5, 6]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = {
+        "hedge": {"bandit": {"state_path": str(state_path), "min_decisions": 4}},
+        "shadow": {"decision_log_path": str(tmp_path / "missing.jsonl")},
+    }
+
+    selector = ContextualBanditSelector(config, ["a"])
+
+    assert selector.is_eligible() is True
+    assert selector._a["a"][0][0] == 2
+    assert selector._b["a"].tolist() == [1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.unit
+def test_bandit_update_from_missing_reward_log_returns_zero(tmp_path):
+    config = {
+        "hedge": {"bandit": {"state_path": str(tmp_path / "state.json")}},
+        "shadow": {"decision_log_path": str(tmp_path / "missing.jsonl")},
+    }
+
+    selector = ContextualBanditSelector(config, ["a"])
+
+    assert selector.update_from_reward_log() == 0
