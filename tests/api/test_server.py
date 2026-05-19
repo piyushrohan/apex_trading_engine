@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -80,6 +81,32 @@ def test_explain_latest_from_journal(client, tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_explain_latest_returns_404_when_journal_is_empty(
+    client, tmp_path, monkeypatch
+):
+    import src.api.server as server_module
+
+    server_module._config = None
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "explainability": {"journal_path": str(tmp_path / "missing.jsonl")},
+            "data": {"storage": {"db_path": str(tmp_path / "x.duckdb")}},
+            "paper": {},
+            "live": {},
+        },
+    )
+    store = get_status_store()
+    with store._lock:
+        store.last_explanation = None
+
+    resp = client.get("/explain/latest")
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.unit
 def test_portfolio_endpoint(client, tmp_path, monkeypatch):
     import src.api.server as server_module
 
@@ -127,6 +154,32 @@ def test_paper_metrics_endpoint(client, tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_positions_alias_and_aggregate_metrics(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    db_path = str(tmp_path / "aggregate.duckdb")
+    server_module._config = None
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "data": {"storage": {"db_path": db_path}},
+            "paper": {},
+            "live": {},
+        },
+    )
+
+    positions_resp = client.get("/positions")
+    metrics_resp = client.get("/metrics")
+
+    assert positions_resp.status_code == 200
+    assert positions_resp.json()["book_id"] == "primary"
+    assert metrics_resp.status_code == 200
+    assert "status" in metrics_resp.json()
+    assert "paper" in metrics_resp.json()
+
+
+@pytest.mark.unit
 def test_ws_status_stream(client):
     store = get_status_store()
     store.update(operator_mode="paper", symbol="ETHUSDC", regime="MEAN_REVERSION")
@@ -134,3 +187,24 @@ def test_ws_status_stream(client):
         message = ws.receive_json()
     assert message["operator_mode"] == "paper"
     assert message["symbol"] == "ETHUSDC"
+
+
+@pytest.mark.unit
+def test_main_uses_configurable_bind_host(monkeypatch):
+    import src.api.server as server_module
+
+    calls = []
+
+    class FakeUvicorn:
+        @staticmethod
+        def run(*args, **kwargs):
+            calls.append((args, kwargs))
+
+    monkeypatch.setitem(sys.modules, "uvicorn", FakeUvicorn)
+    monkeypatch.setenv("APEX_API_HOST", "0.0.0.0")
+
+    server_module.main()
+
+    assert calls[0][0] == ("src.api.server:app",)
+    assert calls[0][1]["host"] == "0.0.0.0"
+    assert calls[0][1]["port"] == 8080

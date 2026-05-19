@@ -20,3 +20,11 @@ def test_maker_grid_adapter_builds_two_sided_post_only_orders():
     assert plan.orders[1].position_side == "SHORT"
     assert plan.orders[0].price == 3499.98
     assert plan.orders[-1].price == 3500.06
+
+
+@pytest.mark.unit
+def test_maker_grid_adapter_returns_empty_plan_for_invalid_inputs():
+    adapter = MakerGridAdapter()
+
+    assert adapter.build_grid("ETHUSDC", 3500.0, 0.0).orders == []
+    assert adapter.build_grid("ETHUSDC", 3500.0, 1.0, levels=0).orders == []

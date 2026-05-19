@@ -60,3 +60,85 @@ def test_risk_engine_leverage_cap(mock_config):
     )
 
     assert approved_additional == 0.0  # No more leverage allowed
+
+
+@pytest.mark.risk
+def test_risk_engine_equity_and_kelly_guard_edges(mock_config):
+    mock_config["environment"]["initial_capital"] = 0.0
+    engine = RiskEngine(mock_config)
+
+    engine.update_equity(current_equity=-1.0)
+    assert engine.is_kill_switch_active is False
+    assert engine.calculate_kelly_size(0.0, 1.0, 1.0) == 0.0
+    assert engine.calculate_kelly_size(0.4, 1.0, 1.0) == 0.0
+    assert engine.project_hedge_leverages(1.0, 1.0, 0.0, 3500.0) == (
+        0.0,
+        0.0,
+        0.0,
+    )
+
+
+@pytest.mark.risk
+def test_risk_engine_hedge_limit_rejections(mock_config):
+    mock_config["execution"].update(
+        {
+            "position_mode": "hedge",
+            "max_gross_leverage": 2.0,
+            "max_net_leverage": 1.0,
+            "max_hedge_ratio": 0.4,
+        }
+    )
+    engine = RiskEngine(mock_config)
+
+    ok, reason = engine.check_hedge_limits(
+        long_qty=3.0,
+        short_qty=0.0,
+        equity=1000.0,
+        mark_price=500.0,
+    )
+    assert ok is False
+    assert "net leverage" in reason
+
+    ok, reason = engine.check_hedge_limits(
+        long_qty=1.0,
+        short_qty=0.5,
+        equity=1000.0,
+        mark_price=500.0,
+        is_hedge_leg=True,
+    )
+    assert ok is False
+    assert "hedge ratio" in reason
+
+    ok, reason = engine.check_hedge_limits(
+        long_qty=1.0,
+        short_qty=0.2,
+        equity=1000.0,
+        mark_price=500.0,
+        is_hedge_leg=True,
+    )
+    assert ok is True
+    assert reason == ""
+
+
+@pytest.mark.risk
+def test_risk_engine_approve_order_rejects_sell_when_hedge_limits_fail(mock_config):
+    mock_config["execution"].update(
+        {
+            "position_mode": "hedge",
+            "max_gross_leverage": 2.0,
+            "max_net_leverage": 0.5,
+        }
+    )
+    engine = RiskEngine(mock_config)
+
+    approved = engine.approve_order(
+        proposed_side="SELL",
+        proposed_fraction=1.0,
+        current_exposure=0.0,
+        long_qty=0.0,
+        short_qty=0.0,
+        equity=1000.0,
+        mark_price=1000.0,
+    )
+
+    assert approved == 0.0
