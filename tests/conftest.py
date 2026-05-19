@@ -10,7 +10,22 @@ def mock_config():
     """Deterministic configuration for all tests."""
     return {
         "data": {"target_symbol": "ETHUSDC", "target_interval": "3m"},
-        "execution": {"mode": "MAKER_ONLY", "slippage_tolerance_bps": 2.0},
+        "execution": {
+            "operator_mode": "paper",
+            "position_mode": "one_way",
+            "max_leverage": 3,
+            "kelly_fraction_cap": 0.3,
+            "max_daily_drawdown": 0.05,
+        },
+        "live": {"enabled": False},
+        "paper": {
+            "enabled": True,
+            "min_days": 7,
+            "min_trades": 100,
+            "min_sharpe": 1.0,
+            "max_drawdown": 0.08,
+        },
+        "hedge": {"enabled": False},
         "risk": {"max_leverage": 3, "max_drawdown_pct": 0.10, "kelly_fraction": 0.5},
         "technicals": {
             "rolling_window": 10,

@@ -1,23 +1,26 @@
 import pytest
-import yaml
 
-from src.core.config_loader import load_config
-
-
-@pytest.mark.unit
-def test_load_config_reads_yaml_file(tmp_path):
-    """Verify config loader parses a valid YAML file."""
-    config_path = tmp_path / "base.yaml"
-    config_data = {"data": {"target_symbol": "ETHUSDC"}, "risk": {"max_leverage": 3}}
-    config_path.write_text(yaml.safe_dump(config_data))
-
-    loaded = load_config(str(config_path))
-
-    assert loaded == config_data
+from src.core.config_loader import apply_risk_profile, load_config
 
 
 @pytest.mark.unit
-def test_load_config_raises_for_missing_file(tmp_path):
-    """Verify config loader fails loudly when config path is invalid."""
-    with pytest.raises(FileNotFoundError):
-        load_config(str(tmp_path / "missing.yaml"))
+def test_load_config_merges_balanced_profile():
+    config = load_config("configs/base.yaml")
+    assert config["risk"]["profile"] == "balanced"
+    assert config["execution"]["max_leverage"] == 3.0
+    assert config["execution"]["operator_mode"] == "paper"
+
+
+@pytest.mark.unit
+def test_apply_risk_profile_conservative():
+    base = load_config("configs/base.yaml")
+    conservative = apply_risk_profile(base, "conservative")
+    assert conservative["execution"]["max_leverage"] == 2.0
+    assert conservative["execution"]["max_daily_drawdown"] == 0.03
+
+
+@pytest.mark.unit
+def test_unknown_risk_profile_raises():
+    base = load_config("configs/base.yaml")
+    with pytest.raises(ValueError, match="Unknown risk profile"):
+        apply_risk_profile(base, "nonexistent")

@@ -61,7 +61,7 @@ class OrderManager:
     async def cancel_order(self, order_id: str) -> bool:
         """Cancels an open limit order."""
         logger.info(f"[{self.symbol}] Cancelling Order {order_id}")
-        return True  # Mocked
+        return await self.rest_client.cancel_order(self.symbol, order_id)
 
     async def cancel_and_replace(
         self,

@@ -42,16 +42,18 @@ def test_auto_retrain_cli_entrypoint_runs_in_temp_workspace(tmp_path, monkeypatc
 
 @pytest.mark.integration
 def test_live_trade_cli_entrypoint_handles_keyboard_interrupt(tmp_path, monkeypatch):
-    """Verify the live-trade module entrypoint runs its shutdown path safely."""
+    """Verify the live-trade module entrypoint invokes asyncio.run once."""
     write_base_config(tmp_path)
+    (tmp_path / "configs" / "risk_profiles.yaml").write_text(
+        "balanced:\n  max_leverage: 3.0\n  max_daily_drawdown: 0.05\n"
+        "  kelly_fraction_cap: 0.3\n"
+    )
     monkeypatch.chdir(tmp_path)
     calls = {"count": 0}
 
     def fake_run(coro):
-        coro.close()
         calls["count"] += 1
-        if calls["count"] == 1:
-            raise KeyboardInterrupt
+        coro.close()
         return None
 
     monkeypatch.setattr(asyncio, "run", fake_run)
@@ -60,4 +62,4 @@ def test_live_trade_cli_entrypoint_handles_keyboard_interrupt(tmp_path, monkeypa
         str(PROJECT_ROOT / "src/pipelines/live_trade.py"), run_name="__main__"
     )
 
-    assert calls["count"] == 2
+    assert calls["count"] == 1

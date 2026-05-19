@@ -9,9 +9,12 @@ from src.execution.order_manager import OrderManager
 @pytest.mark.unit
 async def test_cancel_order_returns_true(mock_config):
     """Verify cancel_order exposes a successful mocked cancellation."""
-    manager = OrderManager(mock_config, AsyncMock())
+    rest_client = AsyncMock()
+    rest_client.cancel_order = AsyncMock(return_value=True)
+    manager = OrderManager(mock_config, rest_client)
 
     assert await manager.cancel_order("order-123") is True
+    rest_client.cancel_order.assert_awaited_once_with("ETHUSDC", "order-123")
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -46,7 +47,7 @@ def ws_config():
 async def test_binance_websocket_builds_stream_url_and_handles_messages(
     ws_config, monkeypatch
 ):
-    """Verify WebSocket connect wires the combined streams and parses messages."""
+    """Verify WebSocket wires combined streams including markPrice."""
     captured = {"messages": []}
 
     def fake_connect(url):
@@ -54,22 +55,30 @@ async def test_binance_websocket_builds_stream_url_and_handles_messages(
 
     monkeypatch.setattr(binance_ws.websockets, "connect", fake_connect)
 
-    ws = BinanceWebSocket(ws_config)
-    ws._handle_message = lambda data: captured["messages"].append(data)
+    stop = asyncio.Event()
+    ws = BinanceWebSocket(
+        ws_config, on_message=lambda data: captured["messages"].append(data)
+    )
 
-    await ws.connect()
+    async def stop_soon():
+        await asyncio.sleep(0.01)
+        stop.set()
 
-    assert "ethusdc@aggTrade" in captured["url"]
-    assert "ethusdc@depth5@100ms" in captured["url"]
-    assert "btcusdc@aggTrade" in captured["url"]
+    asyncio.create_task(stop_soon())
+    await ws.run_until_stopped(stop)
+
+    url = captured["url"]
+    assert "ethusdc@aggTrade" in url
+    assert "ethusdc@depth5@100ms" in url
+    assert "ethusdc@markPrice@1s" in url
+    assert "btcusdc@aggTrade" in url
     assert captured["messages"][0]["data"]["p"] == "3000"
 
 
 @pytest.mark.unit
 def test_binance_websocket_init_normalizes_symbols(ws_config):
-    """Verify configured symbols are normalized for Binance stream names."""
     ws = BinanceWebSocket(ws_config)
-
     assert ws.target_symbol == "ethusdc"
     assert ws.macro_symbol == "btcusdc"
-    assert ws._handle_message({"stream": "noop"}) is None
+    names = ws.stream_names()
+    assert any("markPrice" in n for n in names)

@@ -1,6 +1,10 @@
 import asyncio
+import hashlib
+import hmac
 import logging
-from typing import List, Optional
+import time
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 
 import aiohttp
 import pandas as pd
@@ -20,6 +24,7 @@ class BinanceRESTClient:
         self.api_key = api_key
         self.api_secret = api_secret
         self.session = None
+        self.listen_key: Optional[str] = None
 
     async def _get_session(self):
         if self.session is None or self.session.closed:
@@ -32,6 +37,203 @@ class BinanceRESTClient:
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
+
+    def _sign_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.api_secret:
+            raise ValueError("API secret required for signed Binance requests")
+        payload = {**params, "timestamp": int(time.time() * 1000)}
+        query = urlencode(payload)
+        signature = hmac.new(
+            self.api_secret.encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        payload["signature"] = signature
+        return payload
+
+    async def _signed_request(
+        self, method: str, endpoint: str, params: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        session = await self._get_session()
+        signed = self._sign_params(params or {})
+        url = f"{self.BASE_URL}{endpoint}"
+
+        for attempt in range(3):
+            try:
+                if method == "GET":
+                    ctx = session.get(url, params=signed)
+                elif method == "POST":
+                    ctx = session.post(url, params=signed)
+                elif method == "DELETE":
+                    ctx = session.delete(url, params=signed)
+                else:
+                    raise ValueError(f"Unsupported method: {method}")
+
+                async with ctx as response:
+                    if response.status in (200, 201):
+                        return await response.json()
+                    text = await response.text()
+                    logger.error(
+                        f"Signed API {method} {endpoint} failed "
+                        f"{response.status}: {text}"
+                    )
+            except Exception as exc:
+                logger.error(f"Signed request error attempt {attempt + 1}: {exc}")
+            await asyncio.sleep(0.5)
+        return None
+
+    async def place_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        timeInForce: str = "GTX",
+        orderType: str = "LIMIT",
+        positionSide: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "side": side.upper(),
+            "type": orderType,
+            "quantity": quantity,
+            "price": price,
+            "timeInForce": timeInForce,
+        }
+        if positionSide:
+            params["positionSide"] = positionSide
+        return await self._signed_request("POST", "/fapi/v1/order", params)
+
+    async def cancel_order(self, symbol: str, order_id: str) -> bool:
+        result = await self._signed_request(
+            "DELETE",
+            "/fapi/v1/order",
+            {"symbol": symbol, "orderId": order_id},
+        )
+        return result is not None
+
+    async def cancel_all_open_orders(self, symbol: str) -> int:
+        """Cancel all open orders for a symbol."""
+        result = await self._signed_request(
+            "DELETE",
+            "/fapi/v1/allOpenOrders",
+            {"symbol": symbol},
+        )
+        if result is None:
+            return 0
+        if isinstance(result, dict) and "code" in result:
+            return 0
+        return 1
+
+    async def set_hedge_mode(self, enabled: bool = True) -> bool:
+        """Enable/disable Binance hedge mode for dual LONG/SHORT legs."""
+        result = await self._signed_request(
+            "POST",
+            "/fapi/v1/positionSide/dual",
+            {"dualSidePosition": "true" if enabled else "false"},
+        )
+        return result is not None
+
+    async def get_position_mode(self) -> Optional[Dict[str, Any]]:
+        """Return Binance dual-side position mode state."""
+        result = await self._signed_request("GET", "/fapi/v1/positionSide/dual")
+        return result if isinstance(result, dict) else None
+
+    async def set_leverage(
+        self, symbol: str, leverage: int
+    ) -> Optional[Dict[str, Any]]:
+        """Set futures leverage for the configured symbol."""
+        return await self._signed_request(
+            "POST",
+            "/fapi/v1/leverage",
+            {"symbol": symbol, "leverage": int(leverage)},
+        )
+
+    async def get_usdc_balance(self) -> Optional[Dict[str, Any]]:
+        """Fetch USDC wallet balance for account-equity reconciliation."""
+        result = await self._signed_request("GET", "/fapi/v2/balance")
+        if not isinstance(result, list):
+            return None
+        for row in result:
+            if row.get("asset") == "USDC":
+                return row
+        return None
+
+    async def get_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch position risk snapshot (dual-leg in hedge mode)."""
+        params: Dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        result = await self._signed_request("GET", "/fapi/v2/positionRisk", params)
+        if not isinstance(result, list):
+            return []
+        if symbol:
+            return [p for p in result if p.get("symbol") == symbol]
+        return result
+
+    async def close_position_market(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        position_side: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Reduce-only market order to flatten a leg.
+        side: SELL to close long, BUY to close short.
+        """
+        params: Dict[str, Any] = {
+            "symbol": symbol,
+            "side": side.upper(),
+            "type": "MARKET",
+            "quantity": quantity,
+            "reduceOnly": "true",
+        }
+        if position_side:
+            params["positionSide"] = position_side
+        return await self._signed_request("POST", "/fapi/v1/order", params)
+
+    async def get_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        result = await self._signed_request(
+            "GET", "/fapi/v1/openOrders", {"symbol": symbol}
+        )
+        return result if isinstance(result, list) else []
+
+    async def get_recent_fills(
+        self, symbol: str, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        result = await self._signed_request(
+            "GET",
+            "/fapi/v1/userTrades",
+            {"symbol": symbol, "limit": limit},
+        )
+        return result if isinstance(result, list) else []
+
+    async def _public_get(
+        self, endpoint: str, params: Optional[Dict[str, Any]] = None
+    ) -> Optional[Any]:
+        session = await self._get_session()
+        url = f"{self.BASE_URL}{endpoint}"
+        try:
+            async with session.get(url, params=params or {}) as response:
+                if response.status == 200:
+                    return await response.json()
+                logger.error(
+                    f"Public API GET {endpoint} failed {response.status}: "
+                    f"{await response.text()}"
+                )
+        except Exception as exc:
+            logger.error(f"Public GET {endpoint} error: {exc}")
+        return None
+
+    async def fetch_premium_index(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Mark price and last funding rate for a symbol."""
+        data = await self._public_get("/fapi/v1/premiumIndex", {"symbol": symbol})
+        return data if isinstance(data, dict) else None
+
+    async def fetch_open_interest(self, symbol: str) -> Optional[float]:
+        data = await self._public_get("/fapi/v1/openInterest", {"symbol": symbol})
+        if isinstance(data, dict) and "openInterest" in data:
+            return float(data["openInterest"])
+        return None
 
     async def fetch_klines(
         self,
@@ -167,7 +369,8 @@ class BinanceRESTClient:
         async with session.post(endpoint) as response:
             if response.status == 200:
                 data = await response.json()
-                return data.get("listenKey")
+                self.listen_key = data.get("listenKey")
+                return self.listen_key
             else:
                 logger.error(f"Failed to get listen key: {await response.text()}")
                 return None
@@ -176,8 +379,13 @@ class BinanceRESTClient:
         """Keeps the listen key alive. Call every 30-60 minutes."""
         session = await self._get_session()
         endpoint = f"{self.BASE_URL}/fapi/v1/listenKey"
+        params = {"listenKey": self.listen_key} if self.listen_key else None
 
-        async with session.put(endpoint) as response:
+        try:
+            ctx = session.put(endpoint, params=params)
+        except TypeError:
+            ctx = session.put(endpoint)
+        async with ctx as response:
             if response.status != 200:
                 logger.error(
                     f"Failed to keep-alive listen key: {await response.text()}"
@@ -187,7 +395,14 @@ class BinanceRESTClient:
         """Closes the current listen key."""
         session = await self._get_session()
         endpoint = f"{self.BASE_URL}/fapi/v1/listenKey"
+        params = {"listenKey": self.listen_key} if self.listen_key else None
 
-        async with session.delete(endpoint) as response:
+        try:
+            ctx = session.delete(endpoint, params=params)
+        except TypeError:
+            ctx = session.delete(endpoint)
+        async with ctx as response:
             if response.status != 200:
                 logger.error(f"Failed to close listen key: {await response.text()}")
+            else:
+                self.listen_key = None
