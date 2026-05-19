@@ -1,10 +1,14 @@
 import pytest
 
 from src.strategies.hedge.base import HedgeContext
+from src.strategies.hedge.eth_btc_rs_hedge import EthBtcRelativeStrengthHedgeStrategy
+from src.strategies.hedge.funding_bias_hedge import FundingBiasHedgeStrategy
+from src.strategies.hedge.maker_grid_hedge import MakerGridHedgeStrategy
 from src.strategies.hedge.protective_hedge import ProtectiveHedgeStrategy
 from src.strategies.hedge.regime_straddle import RegimeStraddleStrategy
 from src.strategies.hedge.registry import build_hedge_orchestrator
 from src.strategies.hedge.signal_disagreement import SignalDisagreementStrategy
+from src.strategies.hedge.sweep_dual_leg import SweepDualLegStrategy
 
 
 def _ctx(**kwargs) -> HedgeContext:
@@ -80,3 +84,80 @@ def test_hedge_orchestrator_journal_payload(mock_config):
     assert len(payload["candidates"]) == 3
     if proposal:
         assert payload["selected"] in payload["candidates"]
+
+
+@pytest.mark.unit
+def test_relative_strength_hedge_scores_high_zscore(mock_config):
+    strat = EthBtcRelativeStrengthHedgeStrategy(mock_config)
+    ctx = _ctx(
+        eth_btc_zscore=2.1,
+        primary_action=0,
+        extra={"cvd": -100.0},
+    )
+    assert strat.score(ctx) >= 0.55
+    proposal = strat.propose(ctx)
+    assert proposal.strategy_name == "eth_btc_rs_hedge"
+    assert proposal.long_delta_qty > 0
+
+
+@pytest.mark.unit
+def test_sweep_dual_leg_requires_sweep_and_flow_conflict(mock_config):
+    strat = SweepDualLegStrategy(mock_config)
+    assert strat.score(_ctx()) < 0.1
+    ctx = _ctx(is_buy_liquidity_sweep=True, extra={"cvd": -10.0})
+    assert strat.score(ctx) >= 0.8
+    proposal = strat.propose(ctx)
+    assert proposal.long_delta_qty > 0 and proposal.short_delta_qty > 0
+
+
+@pytest.mark.unit
+def test_funding_bias_hedge_scores_extreme_funding(mock_config):
+    strat = FundingBiasHedgeStrategy(mock_config)
+    assert strat.score(_ctx(funding_rate=0.0)) < 0.1
+    ctx = _ctx(funding_rate=0.0006, primary_action=0, trend_slope=0.0)
+    assert strat.score(ctx) >= 0.6
+    proposal = strat.propose(ctx)
+    assert proposal.short_delta_qty > 0
+
+
+@pytest.mark.unit
+def test_maker_grid_scores_chop_tight_market(mock_config):
+    strat = MakerGridHedgeStrategy(mock_config)
+    ctx = _ctx(
+        regime="CHOP_COMPRESSION",
+        volatility_zscore=-0.2,
+        trend_slope=0.0,
+        extra={"spread_bps": 1.0},
+    )
+    assert strat.score(ctx) >= 0.6
+    proposal = strat.propose(ctx)
+    assert proposal.long_delta_qty > 0 and proposal.short_delta_qty > 0
+
+
+@pytest.mark.unit
+def test_registry_registers_all_seven_hedge_plugins(mock_config):
+    config = dict(mock_config)
+    config["hedge"] = {
+        "enabled": True,
+        "min_score": 0.99,
+        "strategies": {
+            "signal_disagreement": {"enabled": True},
+            "regime_straddle": {"enabled": True},
+            "protective_hedge": {"enabled": True},
+            "eth_btc_rs_hedge": {"enabled": True},
+            "sweep_dual_leg": {"enabled": True},
+            "maker_grid_hedge": {"enabled": True},
+            "funding_bias_hedge": {"enabled": True},
+        },
+    }
+    orch = build_hedge_orchestrator(config)
+    _, payload = orch.evaluate(_ctx())
+    assert set(payload["candidates"]) == {
+        "signal_disagreement",
+        "regime_straddle",
+        "protective_hedge",
+        "eth_btc_rs_hedge",
+        "sweep_dual_leg",
+        "maker_grid_hedge",
+        "funding_bias_hedge",
+    }

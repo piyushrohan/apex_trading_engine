@@ -1,14 +1,16 @@
 """Read-only FastAPI server for operator status and explainability."""
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 from src.api.status_store import get_status_store
 from src.core.config_loader import load_config
 from src.data.cache_manager import DuckDBCacheManager
 from src.mlops.explainability import ExplainabilityEngine
+from src.reports.paper_report import generate_paper_report
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,43 @@ def portfolio(book_id: str = "primary"):
         "latest_equity_from_db": latest_equity,
         "updated_at": store.updated_at,
     }
+
+
+@app.get("/positions")
+def positions(book_id: str = "primary"):
+    """Alias for terminal position panels."""
+    return portfolio(book_id=book_id)
+
+
+@app.get("/metrics")
+def metrics(book_id: str = "primary"):
+    """Dashboard-friendly aggregate metrics."""
+    return {
+        "status": status(),
+        "paper": paper_metrics(book_id=book_id),
+    }
+
+
+@app.get("/metrics/paper")
+def paper_metrics(book_id: str = "primary"):
+    """Paper performance summary for terminal/dashboard surfaces."""
+    config = get_config()
+    return generate_paper_report(config=config, book_id=book_id)
+
+
+@app.websocket("/ws/status")
+async def ws_status(websocket: WebSocket):
+    """Push operator status snapshots for the terminal."""
+    await websocket.accept()
+    store = get_status_store()
+    try:
+        while True:
+            payload = store.snapshot()
+            payload["last_explanation"] = store.last_explanation
+            await websocket.send_json(payload)
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        logger.info("Status websocket disconnected")
 
 
 def main():

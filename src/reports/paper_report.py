@@ -45,6 +45,22 @@ def load_journal_trades(journal_path: str, mode: str = "paper") -> List[dict]:
     return trades
 
 
+def load_journal_fills(journal_path: str, mode: str = "paper") -> List[dict]:
+    path = Path(journal_path)
+    if not path.exists():
+        return []
+    fills = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("execution", {}).get("mode") != mode:
+            continue
+        if row.get("event") == "paper_fill":
+            fills.append(row)
+    return fills
+
+
 def generate_paper_report(
     config: Optional[dict] = None,
     book_id: str = "primary",
@@ -61,7 +77,12 @@ def generate_paper_report(
     cache.close()
 
     journal_trades = load_journal_trades(journal_path)
+    journal_fills = load_journal_fills(journal_path)
     non_flat = [t for t in journal_trades if t.get("book", {}).get("role") == "primary"]
+    primary_fills = [
+        f for f in journal_fills if f.get("book", {}).get("role") == "primary"
+    ]
+    fill_rate = len(primary_fills) / len(non_flat) if non_flat else None
 
     if equity_df.empty:
         return {
@@ -72,7 +93,8 @@ def generate_paper_report(
             "sharpe": 0.0,
             "max_drawdown": 0.0,
             "final_equity": None,
-            "fill_rate": None,
+            "filled_orders": len(primary_fills),
+            "fill_rate": fill_rate,
         }
 
     equity = equity_df["equity"]
@@ -85,6 +107,8 @@ def generate_paper_report(
         "max_drawdown": round(_max_drawdown(equity), 4),
         "total_journal_decisions": len(journal_trades),
         "directional_decisions": len(non_flat),
+        "filled_orders": len(primary_fills),
+        "fill_rate": round(fill_rate, 4) if fill_rate is not None else None,
         "long_signals": sum(1 for t in non_flat if t.get("decision") == "LONG"),
         "short_signals": sum(1 for t in non_flat if t.get("decision") == "SHORT"),
     }

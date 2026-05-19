@@ -11,7 +11,10 @@ Tracks delivery against [PRODUCTION_CHECKLIST_AND_ROADMAP.md](./PRODUCTION_CHECK
 | Item | Status |
 |------|--------|
 | **Milestone 5** — Explainability v2 + API | `DONE` |
-| **Milestone 6** — ML & MLOps | `NOT_STARTED` |
+| **Milestone 6** — ML & MLOps | `DONE` |
+| **Milestone 7** — Observability & CI | `DONE` |
+| **Milestone 8** — Terminal | `DONE` |
+| **Milestone 9** — Contextual bandit selector | `DONE` |
 | **Phase 0** — Foundations | `DONE` |
 
 ---
@@ -70,11 +73,87 @@ Run the trading pipeline in another terminal so `/status` and `/explain/latest` 
 
 ---
 
-## Milestone 6 — Next
+## Milestone 6 — ML & MLOps (P1)
 
-- Real GBM + PPO train/save/load
-- Shadow lane runner inside `TradingPipeline`
-- `promotion_service.py`
+| Task | Status | Notes |
+|------|--------|-------|
+| GBM train/save/load | DONE | `GBMAgent.train()`, `save()`, `load()` with LightGBM when available and deterministic fallback when native LightGBM libs are unavailable |
+| PPO train/save/load | DONE | `PPOAgent.train()` supervised warm-start plus checkpoint `save()` / `load()` |
+| Registry metric/status updates | DONE | `update_model_metrics()`, `set_model_status()`, `rollback_prod()` |
+| Auto-retrain real data path | DONE | Reads DuckDB OHLCV, builds supervised labels/features, trains candidate, saves artifact, runs OOS backtest, evaluates safety, promotes to SHADOW or rejects |
+| Shadow lane runner | DONE | `ShadowLaneRunner` runs candidate models through shared `PaperExecutionAdapter` with `book.role=shadow` and logs decisions |
+| TradingPipeline shadow integration | DONE | Pipeline invokes shadow lanes when `shadow.enabled` is true under paper or live operator mode |
+| Promotion service | DONE | `src/mlops/promotion_service.py` compares shadow vs primary metrics and promotes, rejects, or rolls back independently of paper→live gate |
+| Hedge T-C plugins | DONE | `eth_btc_rs_hedge`, `sweep_dual_leg`, `funding_bias_hedge` implemented and registered |
+| All-seven hedge score logging | DONE | Registry covers T1-T7; primary and shadow journal payloads include `hedge.candidates` for bandit training |
+| Active PROD loading | DONE | `TradingPipeline` now loads active registry artifacts into the primary `MetaController` before inference |
+| Reproducibility manifests | DONE | Model registry writes `manifest.json` with git hash, data snapshot id, hyperparams, and metrics |
+| Shadow metrics | DONE | Shadow decisions log timestamp, equity, PnL, and bandit context for promotion windows |
+
+### Milestone 6 exit criteria
+
+- [x] GBM/PPO candidates can train, save, and load registry artifacts
+- [x] Auto-retrain no longer uses mocked PnL/trades for candidate evaluation
+- [x] Shadow lane uses shared paper simulator and shadow book tags
+- [x] Promotion service separates shadow→prod from operator paper→live
+- [x] Shadow lanes run continuously in the shared paper/live `TradingPipeline` loop when `shadow.enabled` is true
+- [x] Hedge T-C plugins and all-seven strategy score logging are complete
+- [x] Train → shadow → promote → rollback paths are covered by automated MLOps tests
+
+---
+
+## Milestone 7 — Observability & CI (P1)
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Prometheus metrics | DONE | `src/observability/metrics.py` exposes paper/live PnL, inference latency, and WS/ingestion health with a no-op fallback |
+| Pipeline metrics wiring | DONE | `TradingPipeline` records inference latency, mode/book PnL, and ingestion health |
+| Observability compose | DONE | `docker-compose.observability.yml` plus `ops/prometheus.yml` for Prometheus + Grafana |
+| Paper validation workflow | DONE | `.github/workflows/paper-trading-validation.yml` runs bounded paper tests and uploads journal/report artifacts |
+| Hedge T-D maker grid | DONE | `maker_grid_hedge.py` plus `src/execution/grid_adapter.py` |
+| Hedge attribution report | DONE | `src/reports/hedge_report.py` aggregates selected strategy counts, scores, and hedge PnL |
+| Live exchange prep | DONE | Live startup can set hedge mode and symbol leverage before account sync |
+| Paper fill realism | DONE | Paper adapter supports partial fills; paper fills are journaled and reported as fill-rate metrics |
+| CI model/shadow workflows | DONE | Model evaluation and shadow deployment workflows now run real tests/pipeline checks instead of placeholder `echo` steps |
+
+### Milestone 7 exit criteria
+
+- [x] Prometheus-compatible metrics module exists for PnL, inference latency, and WS health
+- [x] Observability stack compose file exists
+- [x] CI paper workflow runs real tests and archives reports/journals
+- [x] Maker-grid hedge strategy and grid order planner are implemented
+- [x] Hedge report produces per-strategy attribution over an N-day window
+
+### Verification
+
+```bash
+venv/bin/ruff check src tests
+venv/bin/pytest -q
+# 149 passed
+```
+
+---
+
+## Milestone 8 — Terminal (P2)
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Terminal frontend | DONE | `frontend/` static terminal shows mode, market/risk, explainability, paper performance, and hedge selector state |
+| API support | DONE | FastAPI exposes `/status`, `/explain/latest`, `/portfolio`, `/positions`, `/metrics`, `/metrics/paper`, and `/ws/status` |
+| Mode indicator | DONE | Terminal displays PAPER/LIVE banner from runtime status |
+| Hedge panel | DONE | Terminal renders selected strategy, bandit arm, exploration state, and candidate scores |
+
+---
+
+## Milestone 9 — Contextual bandit selector (P2)
+
+| Task | Status | Notes |
+|------|--------|-------|
+| LinUCB selector | DONE | `ContextualBanditSelector` selects hedge arms after `hedge.bandit.min_decisions` |
+| Activation gate | DONE | Falls back to rule-based selector until every enabled arm has enough decision history |
+| Rule-score shadow logging | DONE | Bandit mode preserves rule scores as `candidates_rule_shadow` for explainability |
+| Reward update path | DONE | Selector can update persisted bandit state from decision rows containing `hedge_reward` |
+| Rollback switch | DONE | Config can return `hedge.selection` to `rule_based` without code changes |
 
 ---
 
@@ -84,3 +163,7 @@ Run the trading pipeline in another terminal so `/status` and `/explain/latest` 
 |------|--------|
 | 2026-05-18 | Milestones 1–4 complete |
 | 2026-05-18 | **Milestone 5 complete** — explainability v2, FastAPI read-only API |
+| 2026-05-19 | **Milestone 6 started** — model artifact persistence, real-data auto-retrain path, shadow lane runner, and promotion service |
+| 2026-05-19 | **Milestone 6 complete** — shadow lanes integrated, hedge T-C plugins registered, and all-seven hedge scores logged |
+| 2026-05-19 | **Milestone 7 complete** — metrics, observability compose, paper CI workflow, maker grid, and hedge attribution report |
+| 2026-05-19 | **Milestones 8–9 complete** — terminal API/frontend, active PROD loading, live prep hardening, partial paper fills, registry manifests, CI workflow wiring, and contextual bandit reward update path |

@@ -11,9 +11,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Rolling Retraining
-        run: echo "Future integration: Triggering rolling retraining pipeline..."
+        run: python -m src.mlops.auto_retrain
       - name: Walk-Forward Validation
-        run: echo "Running walk-forward validation and drift analysis..."
+        run: pytest tests/mlops tests/models tests/pipelines/test_backtest_edges.py -q
       - name: Promotion Scoring
-        run: echo "Generating model promotion reports. Explicit safety gates required for PROD."
+        run: pytest tests/mlops/test_promotion_service.py -q
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: model-evaluation-artifacts
+          path: |
+            data_lake/models/**
+            data_lake/hedge_bandit/training/decisions.jsonl
+          if-no-files-found: ignore

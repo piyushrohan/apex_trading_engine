@@ -10,13 +10,30 @@ on:
 
 jobs:
   paper-trading:
-    name: Binance Testnet Paper Trading
+    name: Paper Trading Validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy to Testnet
-        run: echo "Future integration: Deploying to Binance Testnet using isolated secrets..."
-      - name: Telemetry Generation
-        run: echo "Generating trade journals and telemetry artifacts..."
-      - name: Archive Trade Journals
-        run: echo "Archiving trade journals for reconciliation validation..."
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run bounded paper validation tests
+        run: pytest tests/integration/test_paper_e2e.py tests/pipelines/test_paper_trade.py -q
+      - name: Generate paper report
+        run: python -m src.reports.paper_report --config configs/base.yaml > paper_report.json
+      - name: Generate hedge report
+        run: python -m src.reports.hedge_report --config configs/base.yaml > hedge_report.json
+      - name: Archive journals and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-trading-validation
+          path: |
+            data_lake/trade_journal.jsonl
+            data_lake/hedge_bandit/training/decisions.jsonl
+            paper_report.json
+            hedge_report.json
+          if-no-files-found: ignore

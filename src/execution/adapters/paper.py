@@ -74,12 +74,16 @@ class PaperExecutionAdapter(ExecutionAdapter):
         symbol: str,
         market_price: float,
         aggressor_side: Optional[str] = None,
+        available_quantity: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Maker fill simulation: BUY limit fills if market trades at or below price;
         SELL limit fills if market trades at or above price.
+        If available_quantity is provided, fills are capped and remaining order
+        quantity stays open as PARTIALLY_FILLED.
         """
         filled = []
+        remaining_liquidity = available_quantity
         for order_id, order in list(self._open_orders.items()):
             if order["symbol"] != symbol or order["status"] != "NEW":
                 continue
@@ -95,19 +99,36 @@ class PaperExecutionAdapter(ExecutionAdapter):
             if not should_fill:
                 continue
 
-            qty = order["origQty"]
+            open_qty = float(order["origQty"]) - float(order.get("executedQty", 0.0))
+            if remaining_liquidity is None:
+                qty = open_qty
+            else:
+                if remaining_liquidity <= 0:
+                    break
+                qty = min(open_qty, remaining_liquidity)
+                remaining_liquidity -= qty
+            if qty <= 0:
+                continue
+
             fee = qty * limit_price * self.maker_fee_pct
+            total_executed = float(order.get("executedQty", 0.0)) + qty
+            done = total_executed >= float(order["origQty"]) - 1e-12
             fill = {
                 **order,
-                "status": "FILLED",
+                "status": "FILLED" if done else "PARTIALLY_FILLED",
                 "executedQty": qty,
+                "cumulativeExecutedQty": total_executed,
                 "avgPrice": limit_price,
                 "fee": fee,
                 "fill_price": market_price,
                 "aggressor_side": aggressor_side,
             }
             self._fills.append(fill)
-            del self._open_orders[order_id]
+            if done:
+                del self._open_orders[order_id]
+            else:
+                self._open_orders[order_id]["executedQty"] = total_executed
+                self._open_orders[order_id]["status"] = "NEW"
             filled.append(fill)
             logger.debug(f"[PAPER:{self.book_id}] Filled {order_id} @ {limit_price}")
 

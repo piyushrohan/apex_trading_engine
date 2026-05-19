@@ -9,7 +9,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Pull Latest Shadow Model
-        run: echo "Future integration: Pulling latest SHADOW model from ModelRegistry..."
-      - name: Docker Deployment
-        run: echo "Deploying shadow execution container in parallel to production..."
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Validate shadow lane
+        run: pytest tests/mlops/test_shadow_lane.py tests/pipelines/test_paper_trade.py -q
+      - name: Verify registry has optional shadow model
+        run: python -c "from src.mlops.registry import ModelRegistry; r=ModelRegistry(); print({'active_shadow': r.registry_data.get('active_shadow')})"
+      - name: Archive shadow artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shadow-deployment-artifacts
+          path: |
+            data_lake/models/**
+            data_lake/hedge_bandit/training/decisions.jsonl
+          if-no-files-found: ignore

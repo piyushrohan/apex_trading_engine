@@ -103,3 +103,34 @@ def test_portfolio_endpoint(client, tmp_path, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["runtime"]["long_qty"] == 0.2
+
+
+@pytest.mark.unit
+def test_paper_metrics_endpoint(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    db_path = str(tmp_path / "metrics.duckdb")
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "data": {"storage": {"db_path": db_path}},
+            "paper": {},
+            "live": {},
+        },
+    )
+    resp = client.get("/metrics/paper")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["book_id"] == "primary"
+    assert "sharpe" in body
+
+
+@pytest.mark.unit
+def test_ws_status_stream(client):
+    store = get_status_store()
+    store.update(operator_mode="paper", symbol="ETHUSDC", regime="MEAN_REVERSION")
+    with client.websocket_connect("/ws/status") as ws:
+        message = ws.receive_json()
+    assert message["operator_mode"] == "paper"
+    assert message["symbol"] == "ETHUSDC"

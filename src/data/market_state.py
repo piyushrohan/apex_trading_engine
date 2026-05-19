@@ -7,7 +7,7 @@ import pandas as pd
 
 from src.data.cache_manager import DuckDBCacheManager
 from src.data.feature_engine import FeatureEngine
-from src.data.state_vector import build_state_vector
+from src.data.state_vector import STATE_FEATURE_COLUMNS, build_state_vector
 from src.models.regime_detector import RegimeDetector
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,8 @@ class MarketStateService:
         regime_df = self.regime_detector.detect(features)
         row = regime_df.iloc[-1]
         state_vector = build_state_vector(row)
+        market_snapshot = self._latest_market_snapshot()
+        self._persist_latest_features(row)
 
         return {
             "state_vector": state_vector,
@@ -65,6 +67,8 @@ class MarketStateService:
             "is_buy_liquidity_sweep": bool(row.get("is_buy_liquidity_sweep", False)),
             "is_sell_liquidity_sweep": bool(row.get("is_sell_liquidity_sweep", False)),
             "cvd": float(row.get("cvd", 0.0)),
+            "funding_rate": float(market_snapshot.get("funding_rate", 0.0)),
+            "open_interest": float(market_snapshot.get("open_interest", 0.0)),
         }
 
     def seed_from_dataframes(
@@ -85,7 +89,52 @@ class MarketStateService:
             "is_buy_liquidity_sweep": bool(row.get("is_buy_liquidity_sweep", False)),
             "is_sell_liquidity_sweep": bool(row.get("is_sell_liquidity_sweep", False)),
             "cvd": float(row.get("cvd", 0.0)),
+            "funding_rate": 0.0,
         }
+
+    def _latest_market_snapshot(self) -> Dict[str, float]:
+        try:
+            row = self.cache.conn.execute(
+                """
+                SELECT funding_rate, open_interest, mark_price
+                FROM market_snapshots
+                WHERE symbol = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                [self.target_symbol],
+            ).fetchone()
+        except Exception:
+            return {"funding_rate": 0.0, "open_interest": 0.0, "mark_price": 0.0}
+        if not row:
+            return {"funding_rate": 0.0, "open_interest": 0.0, "mark_price": 0.0}
+        return {
+            "funding_rate": float(row[0] or 0.0),
+            "open_interest": float(row[1] or 0.0),
+            "mark_price": float(row[2] or 0.0),
+        }
+
+    def _persist_latest_features(self, row: pd.Series) -> None:
+        """Persist the latest numeric model features for reproducibility."""
+        try:
+            payload = {
+                name: float(row.get(name, 0.0))
+                for name in STATE_FEATURE_COLUMNS
+                if name in row
+            }
+            df = pd.DataFrame(
+                [
+                    {
+                        "timestamp": row.get("timestamp"),
+                        "symbol": self.target_symbol,
+                        "timeframe": self.interval,
+                        "features": payload,
+                    }
+                ]
+            )
+            self.cache.insert_features(df, feature_set_id="state_vector_v1")
+        except Exception as exc:
+            logger.debug("Feature-store insert skipped: %s", exc)
 
     def close(self):
         if self._owns_cache:

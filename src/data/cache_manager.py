@@ -307,7 +307,7 @@ class DuckDBCacheManager:
         regime: str,
         timestamp: Optional[pd.Timestamp] = None,
     ):
-        ts = timestamp or pd.Timestamp.utcnow()
+        ts = timestamp or pd.Timestamp.now(tz="UTC")
         self.conn.execute(
             """
             INSERT INTO paper_equity_snapshots

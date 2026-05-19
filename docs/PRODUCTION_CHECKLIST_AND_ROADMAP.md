@@ -2,6 +2,8 @@
 
 This document turns the full institutional spec into an actionable checklist, defines **two operator modes** (paper / live) plus an **MLOps shadow sub-lane** (shared virtual simulator), **multi-strategy hedge mode** (rule-based selector → contextual bandit), lays out a phased roadmap to production, and includes a copy-paste **agent prompt** to complete the project.
 
+> Implementation note (2026-05-19): milestone delivery through **Milestone 9** is now implemented in code and tracked in [PROGRESS.md](./PROGRESS.md). The historical checklist below is kept as the original production spec; use PROGRESS.md for current completion state and verification results.
+
 ---
 
 ## Trading modes (required architecture)
@@ -905,3 +907,7 @@ src/strategies/hedge/
 ---
 
 *Last updated: two operator modes (paper/live) + shadow MLOps sub-lane (shared paper simulator) + Section T hedge mode.*
+
+#Preview {
+    EmptyView()
+}

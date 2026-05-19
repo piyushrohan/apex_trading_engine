@@ -20,6 +20,12 @@ class RuleBasedHedgeSelector:
     def register(self, strategy: HedgeStrategy) -> None:
         self._strategies[strategy.name] = strategy
 
+    def strategy_names(self) -> list[str]:
+        return list(self._strategies.keys())
+
+    def get_strategy(self, name: str) -> Optional[HedgeStrategy]:
+        return self._strategies.get(name)
+
     def score_all(self, ctx: HedgeContext) -> Dict[str, float]:
         scores = {}
         for name, strategy in self._strategies.items():

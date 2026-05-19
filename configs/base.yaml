@@ -76,6 +76,7 @@ execution:
   max_daily_drawdown: 0.05
   max_gross_leverage: 2.0
   max_net_leverage: 1.0
+  max_hedge_ratio: 0.35
 
 paper:
   enabled: true
@@ -92,6 +93,21 @@ explainability:
 live:
   enabled: false
   skip_paper_gate: false
+  testnet: false
+  leverage: 3
+  margin_type: CROSS
+
+promotion:
+  min_shadow_trades: 50
+  min_sharpe_delta: 0.15
+  max_shadow_drawdown: 0.10
+  max_live_drawdown: 0.10
+  min_live_sharpe: -0.25
+
+observability:
+  metrics:
+    enabled: true
+    port: 9108
 
 shadow:
   enabled: false

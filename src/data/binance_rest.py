@@ -24,6 +24,7 @@ class BinanceRESTClient:
         self.api_key = api_key
         self.api_secret = api_secret
         self.session = None
+        self.listen_key: Optional[str] = None
 
     async def _get_session(self):
         if self.session is None or self.session.closed:
@@ -121,6 +122,40 @@ class BinanceRESTClient:
         if isinstance(result, dict) and "code" in result:
             return 0
         return 1
+
+    async def set_hedge_mode(self, enabled: bool = True) -> bool:
+        """Enable/disable Binance hedge mode for dual LONG/SHORT legs."""
+        result = await self._signed_request(
+            "POST",
+            "/fapi/v1/positionSide/dual",
+            {"dualSidePosition": "true" if enabled else "false"},
+        )
+        return result is not None
+
+    async def get_position_mode(self) -> Optional[Dict[str, Any]]:
+        """Return Binance dual-side position mode state."""
+        result = await self._signed_request("GET", "/fapi/v1/positionSide/dual")
+        return result if isinstance(result, dict) else None
+
+    async def set_leverage(
+        self, symbol: str, leverage: int
+    ) -> Optional[Dict[str, Any]]:
+        """Set futures leverage for the configured symbol."""
+        return await self._signed_request(
+            "POST",
+            "/fapi/v1/leverage",
+            {"symbol": symbol, "leverage": int(leverage)},
+        )
+
+    async def get_usdc_balance(self) -> Optional[Dict[str, Any]]:
+        """Fetch USDC wallet balance for account-equity reconciliation."""
+        result = await self._signed_request("GET", "/fapi/v2/balance")
+        if not isinstance(result, list):
+            return None
+        for row in result:
+            if row.get("asset") == "USDC":
+                return row
+        return None
 
     async def get_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """Fetch position risk snapshot (dual-leg in hedge mode)."""
@@ -334,7 +369,8 @@ class BinanceRESTClient:
         async with session.post(endpoint) as response:
             if response.status == 200:
                 data = await response.json()
-                return data.get("listenKey")
+                self.listen_key = data.get("listenKey")
+                return self.listen_key
             else:
                 logger.error(f"Failed to get listen key: {await response.text()}")
                 return None
@@ -343,8 +379,13 @@ class BinanceRESTClient:
         """Keeps the listen key alive. Call every 30-60 minutes."""
         session = await self._get_session()
         endpoint = f"{self.BASE_URL}/fapi/v1/listenKey"
+        params = {"listenKey": self.listen_key} if self.listen_key else None
 
-        async with session.put(endpoint) as response:
+        try:
+            ctx = session.put(endpoint, params=params)
+        except TypeError:
+            ctx = session.put(endpoint)
+        async with ctx as response:
             if response.status != 200:
                 logger.error(
                     f"Failed to keep-alive listen key: {await response.text()}"
@@ -354,7 +395,14 @@ class BinanceRESTClient:
         """Closes the current listen key."""
         session = await self._get_session()
         endpoint = f"{self.BASE_URL}/fapi/v1/listenKey"
+        params = {"listenKey": self.listen_key} if self.listen_key else None
 
-        async with session.delete(endpoint) as response:
+        try:
+            ctx = session.delete(endpoint, params=params)
+        except TypeError:
+            ctx = session.delete(endpoint)
+        async with ctx as response:
             if response.status != 200:
                 logger.error(f"Failed to close listen key: {await response.text()}")
+            else:
+                self.listen_key = None

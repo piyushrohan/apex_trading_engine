@@ -31,6 +31,17 @@ class MetaController:
 
         logger.info("Initialized Meta-Controller with PPO and GBM Agents.")
 
+    def load_model_artifact(self, model_type: str, model_path: str):
+        """Load a specialist model artifact into the routed controller."""
+        normalized = model_type.upper()
+        if normalized == "PPO":
+            self.ppo_agent.load(model_path)
+        elif normalized in ("GBM", "LIGHTGBM"):
+            self.gbm_agent.load(model_path)
+        else:
+            raise ValueError(f"Unsupported model type: {model_type}")
+        return self
+
     def get_action(
         self, state_vector: list, regime_str: str
     ) -> Tuple[int, float, Dict[str, Any]]:

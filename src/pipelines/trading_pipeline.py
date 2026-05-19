@@ -1,21 +1,28 @@
 import asyncio
+import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.api.status_store import get_status_store
+from src.core.security import SecurityManager
 from src.data.binance_rest import BinanceRESTClient
 from src.data.ingestion_service import DataIngestionService
 from src.data.market_state import MarketStateService
 from src.execution.adapters.base import OrderRequest
 from src.execution.factory import create_execution_adapter, get_operator_mode
+from src.execution.grid_adapter import MakerGridAdapter
 from src.execution.live_gate import check_api_credentials, validate_live_startup
 from src.execution.portfolio import PortfolioService
 from src.execution.position_sync import AccountSynchronizer
 from src.execution.risk_engine import RiskEngine
 from src.mlops.explainability import ExplainabilityEngine
 from src.mlops.registry import ModelRegistry
+from src.mlops.shadow_lane import ShadowLaneRunner
 from src.models.meta_controller import MetaController
+from src.observability.metrics import APEX_METRICS
 from src.strategies.hedge.base import HedgeContext, HedgeProposal
 from src.strategies.hedge.registry import build_hedge_orchestrator
 
@@ -40,14 +47,11 @@ class TradingPipeline:
         self.risk_engine = RiskEngine(config)
         self.registry = ModelRegistry()
         self.meta_controller = MetaController(config)
+        model_id = self._load_active_prod_model()
         self.explainability = ExplainabilityEngine(config)
         self.hedge_orchestrator = build_hedge_orchestrator(config)
 
         self.portfolio = PortfolioService(position_mode=self.position_mode)
-        prod_path = self.registry.get_prod_model_path()
-        model_id = "unregistered"
-        if prod_path:
-            model_id = prod_path.rstrip("/").split("/")[-1]
 
         initial_equity = config.get("environment", {}).get("initial_capital", 1000.0)
         self.primary_book = self.portfolio.get_or_create_book(
@@ -60,6 +64,13 @@ class TradingPipeline:
 
         self.execution_adapter = create_execution_adapter(
             config, self.rest_client, book_id="primary"
+        )
+        self.shadow_runner = ShadowLaneRunner(
+            config=config,
+            registry=self.registry,
+            portfolio=self.portfolio,
+            symbol=self.symbol,
+            operator_mode=self.operator_mode,
         )
         self.account_sync: Optional[AccountSynchronizer] = None
         if self.operator_mode == "live":
@@ -82,7 +93,11 @@ class TradingPipeline:
         mode_label = self.operator_mode.upper()
         logger.info(f"Initializing APEX TradingPipeline [{mode_label}]...")
         self._validate_startup()
+        self._start_metrics_server()
         self._running = True
+
+        if self.operator_mode == "live":
+            await self._prepare_live_exchange()
 
         if self.account_sync:
             await self.account_sync.start()
@@ -101,7 +116,58 @@ class TradingPipeline:
         api_secret = os.getenv("BINANCE_API_SECRET") or config.get("live", {}).get(
             "api_secret"
         )
+        if not (api_key and api_secret):
+            try:
+                api_key, api_secret = SecurityManager().get_api_credentials()
+            except Exception as exc:
+                logger.debug("Encrypted API credentials unavailable: %s", exc)
         return BinanceRESTClient(api_key=api_key, api_secret=api_secret)
+
+    def _load_active_prod_model(self) -> str:
+        registry_data = getattr(self.registry, "registry_data", {}) or {}
+        active = registry_data.get("active_prod")
+        models = registry_data.get("models", {})
+        if not active or active not in models:
+            return "unregistered"
+
+        meta = models[active]
+        model_path = self.registry.get_model_path(active)
+        try:
+            self.meta_controller.load_model_artifact(
+                meta.get("type", "GBM"), model_path
+            )
+            logger.info("Loaded active production model %s from %s", active, model_path)
+        except FileNotFoundError:
+            logger.warning(
+                "Active production model %s has no artifact at %s; using defaults",
+                active,
+                model_path,
+            )
+        return active
+
+    def _start_metrics_server(self):
+        metrics_cfg = self.config.get("observability", {}).get("metrics", {})
+        if not metrics_cfg.get("enabled", True):
+            return
+        APEX_METRICS.start_server(int(metrics_cfg.get("port", 9108)))
+
+    async def _prepare_live_exchange(self):
+        live_cfg = self.config.get("live", {})
+        if self.position_mode == "hedge":
+            set_hedge_mode = getattr(self.rest_client, "set_hedge_mode", None)
+            ok = await set_hedge_mode(True) if set_hedge_mode else True
+            if not ok:
+                raise RuntimeError("Live startup blocked: failed to enable hedge mode")
+        leverage = int(
+            live_cfg.get(
+                "leverage", self.config.get("execution", {}).get("max_leverage", 1)
+            )
+        )
+        if leverage > 0:
+            set_leverage = getattr(self.rest_client, "set_leverage", None)
+            result = await set_leverage(self.symbol, leverage) if set_leverage else {}
+            if result is None:
+                raise RuntimeError("Live startup blocked: failed to set leverage")
 
     def _validate_startup(self):
         if self.operator_mode != "live":
@@ -186,6 +252,8 @@ class TradingPipeline:
     async def _trading_loop(self):
         logger.info(f"Trading loop active for {self.symbol} ({self.operator_mode})")
         loop_interval = self.config.get("data", {}).get("loop_interval_sec", 3.0)
+        max_ticks = self.config.get("data", {}).get("max_ticks")
+        processed_ticks = 0
 
         while self._running:
             try:
@@ -210,8 +278,11 @@ class TradingPipeline:
                     context,
                     ppo_probs,
                     gbm_probs,
-                ) = self.meta_controller.get_dual_inference(
-                    state_vector, current_regime
+                ) = APEX_METRICS.time_inference(
+                    self.operator_mode,
+                    self.meta_controller.get_dual_inference,
+                    state_vector,
+                    current_regime,
                 )
 
                 explanation = self.explainability.decode_decision(
@@ -255,10 +326,21 @@ class TradingPipeline:
                     is_sell_liquidity_sweep=snapshot.get(
                         "is_sell_liquidity_sweep", False
                     ),
-                    funding_rate=0.0,
+                    funding_rate=snapshot.get("funding_rate", 0.0),
+                    extra={
+                        "cvd": snapshot.get("cvd", 0.0),
+                        "spread_bps": snapshot.get("spread_bps", 0.0),
+                    },
                 )
                 hedge_proposal, hedge_payload = self.hedge_orchestrator.evaluate(
                     hedge_ctx
+                )
+                self._append_hedge_bandit_decision(
+                    action=action,
+                    conviction=conviction,
+                    regime=current_regime,
+                    hedge_payload=hedge_payload,
+                    hedge_ctx=hedge_ctx,
                 )
 
                 explanation = self._enrich_journal_entry(explanation, hedge_payload)
@@ -270,6 +352,11 @@ class TradingPipeline:
                 )
 
                 self._persist_paper_snapshot(current_bbo, current_regime)
+                await self.shadow_runner.run_tick(
+                    snapshot=snapshot,
+                    mark_price=current_bbo,
+                    hedge_payload=hedge_payload,
+                )
 
                 if self.risk_engine.is_kill_switch_active:
                     await self._handle_kill_switch(current_bbo)
@@ -288,6 +375,9 @@ class TradingPipeline:
                         await self._execute_hedge(hedge_proposal, current_bbo)
 
                 self._simulate_paper_fills(current_bbo)
+                processed_ticks += 1
+                if max_ticks is not None and processed_ticks >= int(max_ticks):
+                    self._running = False
 
             except asyncio.CancelledError:
                 break
@@ -334,6 +424,17 @@ class TradingPipeline:
                 "gross_qty": book.gross_qty,
             },
         )
+        APEX_METRICS.set_ws_health(
+            self.operator_mode,
+            self.config.get("data", {}).get("ingestion", {}).get("enabled", True),
+        )
+        if mark_price is not None:
+            APEX_METRICS.set_pnl(
+                self.operator_mode,
+                book.role,
+                book.book_id,
+                book.equity - book.initial_equity,
+            )
 
     def _enrich_journal_entry(
         self, explanation: Dict[str, Any], hedge_payload: Dict[str, Any]
@@ -346,6 +447,47 @@ class TradingPipeline:
         explanation["model_id"] = self.primary_book.model_id
         explanation["hedge"] = hedge_payload
         return explanation
+
+    def _append_hedge_bandit_decision(
+        self,
+        *,
+        action: int,
+        conviction: float,
+        regime: str,
+        hedge_payload: Dict[str, Any],
+        hedge_ctx: HedgeContext,
+    ) -> None:
+        if not hedge_payload.get("enabled"):
+            return
+        decision_path = Path(
+            self.config.get("shadow", {}).get(
+                "decision_log_path",
+                "data_lake/hedge_bandit/training/decisions.jsonl",
+            )
+        )
+        decision_path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "execution": {"mode": self.operator_mode},
+            "book": {"role": self.primary_book.role, "id": self.primary_book.book_id},
+            "model_id": self.primary_book.model_id,
+            "action": action,
+            "conviction": conviction,
+            "regime": regime,
+            "bandit_context": {
+                "volatility_zscore": hedge_ctx.volatility_zscore,
+                "funding_rate": hedge_ctx.funding_rate,
+                "primary_action": hedge_ctx.primary_action,
+                "ppo_action_probs": hedge_ctx.ppo_action_probs,
+                "gbm_action_probs": hedge_ctx.gbm_action_probs,
+                "primary_size_fraction": hedge_ctx.primary_size_fraction,
+            },
+            "hedge": hedge_payload,
+            "equity": self.primary_book.equity,
+            "pnl": self.primary_book.equity - self.primary_book.initial_equity,
+        }
+        with open(decision_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
 
     def _compute_approved_fraction(
         self, action: int, conviction: float, current_bbo: float
@@ -410,6 +552,10 @@ class TradingPipeline:
 
     async def _execute_hedge(self, proposal: HedgeProposal, mark_price: float):
         """Place hedge leg adjustments (paper or live) from selected hedge strategy."""
+        if proposal.strategy_name == "maker_grid_hedge":
+            await self._execute_grid_hedge(proposal, mark_price)
+            return
+
         equity = max(self.primary_book.equity, 1.0)
         if proposal.long_delta_qty > 0:
             fraction = proposal.long_delta_qty
@@ -464,6 +610,40 @@ class TradingPipeline:
                 )
             )
 
+    async def _execute_grid_hedge(self, proposal: HedgeProposal, mark_price: float):
+        """Route maker-grid hedge selections through the grid order planner."""
+        grid_cfg = (
+            self.config.get("hedge", {})
+            .get("strategies", {})
+            .get("maker_grid_hedge", {})
+        )
+        equity = max(self.primary_book.equity, 1.0)
+        fraction = max(proposal.long_delta_qty, proposal.short_delta_qty)
+        approved = self.risk_engine.approve_order(
+            "BUY",
+            fraction,
+            current_exposure=self.portfolio.gross_exposure_fraction(
+                self.primary_book.book_id, mark_price
+            ),
+            long_qty=self.primary_book.long_qty,
+            short_qty=self.primary_book.short_qty,
+            equity=equity,
+            mark_price=mark_price,
+            is_hedge_leg=True,
+        )
+        if approved <= 0:
+            return
+        total_qty = max(approved * equity / mark_price, 0.001)
+        plan = MakerGridAdapter().build_grid(
+            symbol=self.symbol,
+            mid_price=mark_price,
+            total_quantity=total_qty,
+            levels=int(grid_cfg.get("grid_levels", 3)),
+            spacing_ticks=int(grid_cfg.get("grid_spacing_ticks", 2)),
+        )
+        for order in plan.orders:
+            await self.execution_adapter.place_order(order)
+
     def _simulate_paper_fills(self, mark_price: float):
         if self.operator_mode != "paper":
             return
@@ -478,6 +658,34 @@ class TradingPipeline:
                 fill["executedQty"],
                 fill["avgPrice"],
                 fill.get("positionSide"),
+            )
+            self.explainability._log_to_journal(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "schema_version": 2,
+                    "event": "paper_fill",
+                    "execution": {"mode": self.operator_mode},
+                    "book": {
+                        "role": self.primary_book.role,
+                        "id": self.primary_book.book_id,
+                    },
+                    "model_id": self.primary_book.model_id,
+                    "symbol": self.symbol,
+                    "side": fill["side"],
+                    "positionSide": fill.get("positionSide"),
+                    "executedQty": fill["executedQty"],
+                    "avgPrice": fill["avgPrice"],
+                    "fee": fill.get("fee", 0.0),
+                }
+            )
+        total_orders = len(self.execution_adapter._fills) + len(
+            self.execution_adapter._open_orders
+        )
+        if total_orders:
+            APEX_METRICS.set_paper_fill_rate(
+                self.operator_mode,
+                self.primary_book.book_id,
+                len(self.execution_adapter._fills) / total_orders,
             )
 
     async def _handle_kill_switch(self, mark_price: float):
