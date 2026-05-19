@@ -189,7 +189,16 @@ def test_account_synchronizer_handles_account_and_order_events():
                         "ep": "3000",
                         "up": "25",
                         "mt": "cross",
-                    }
+                        "ps": "LONG",
+                    },
+                    {
+                        "s": "ETHUSDC",
+                        "pa": "0.3",
+                        "ep": "3100",
+                        "up": "-5",
+                        "mt": "cross",
+                        "ps": "SHORT",
+                    },
                 ],
             }
         }
@@ -209,7 +218,8 @@ def test_account_synchronizer_handles_account_and_order_events():
     )
 
     assert sync.balances["USDC"]["wallet_balance"] == 1000.0
-    assert sync.positions["ETHUSDC"]["amount"] == 1.5
+    assert sync.positions["ETHUSDC"]["long_qty"] == 1.5
+    assert sync.positions["ETHUSDC"]["short_qty"] == 0.3
     assert sync.open_orders["client-1"]["status"] == "FILLED"
     assert position_events[0][0] == "ETHUSDC"
     assert order_events[0][0] == "client-1"

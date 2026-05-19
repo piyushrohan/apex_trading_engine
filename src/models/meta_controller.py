@@ -56,3 +56,27 @@ class MetaController:
         context["selected_by_meta"] = preferred_model_name
 
         return action, conviction, context
+
+    def get_dual_inference(
+        self, state_vector: list, regime_str: str
+    ) -> Tuple[int, float, Dict[str, Any], list, list]:
+        """
+        Run both agents; route primary action by regime preference.
+        Returns: action, conviction, context, ppo_probs, gbm_probs
+        """
+        ppo_action, ppo_conv, ppo_ctx = self.ppo_agent.act(state_vector)
+        gbm_action, gbm_conv, gbm_ctx = self.gbm_agent.act(state_vector)
+        ppo_probs = list(ppo_ctx.get("action_probs", []))
+        gbm_probs = list(gbm_ctx.get("action_probs", []))
+
+        preferred = self.regime_model_map.get(regime_str, "PPO")
+        if preferred == "PPO":
+            action, conviction, context = ppo_action, ppo_conv, ppo_ctx
+        else:
+            action, conviction, context = gbm_action, gbm_conv, gbm_ctx
+
+        context["active_regime"] = regime_str
+        context["selected_by_meta"] = preferred
+        context["ppo_action_probs"] = ppo_probs
+        context["gbm_action_probs"] = gbm_probs
+        return action, conviction, context, ppo_probs, gbm_probs

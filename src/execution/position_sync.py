@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 import aiohttp
 
@@ -10,12 +10,48 @@ from src.data.binance_rest import BinanceRESTClient
 logger = logging.getLogger(__name__)
 
 
+def parse_position_legs(positions: list) -> Dict[str, Dict[str, Any]]:
+    """
+    Normalize Binance positionRisk or ACCOUNT_UPDATE legs into long/short qty.
+    Hedge mode uses positionSide LONG/SHORT; one-way uses BOTH signed amount.
+    """
+    legs = {
+        "long_qty": 0.0,
+        "short_qty": 0.0,
+        "entry_price_long": 0.0,
+        "entry_price_short": 0.0,
+        "unrealized_pnl": 0.0,
+    }
+    for pos in positions:
+        symbol = pos.get("symbol") or pos.get("s")
+        if not symbol:
+            continue
+        amt = float(pos.get("positionAmt", pos.get("pa", 0)))
+        entry = float(pos.get("entryPrice", pos.get("ep", 0)))
+        upnl = float(pos.get("unRealizedProfit", pos.get("up", 0)))
+        side = (pos.get("positionSide") or pos.get("ps") or "BOTH").upper()
+
+        legs["unrealized_pnl"] += upnl
+        if side == "LONG":
+            legs["long_qty"] = abs(amt)
+            legs["entry_price_long"] = entry
+        elif side == "SHORT":
+            legs["short_qty"] = abs(amt)
+            legs["entry_price_short"] = entry
+        else:
+            if amt >= 0:
+                legs["long_qty"] = abs(amt)
+                legs["entry_price_long"] = entry
+            else:
+                legs["short_qty"] = abs(amt)
+                legs["entry_price_short"] = entry
+    return legs
+
+
 class AccountSynchronizer:
     """
     Live account reconciliation via Binance User Data Stream.
-    Listens for ACCOUNT_UPDATE and ORDER_TRADE_UPDATE to synchronize
-    internal AI state with actual Binance account state. This handles
-    manual discretionary interventions seamlessly.
+    Tracks LONG and SHORT legs separately in hedge mode.
     """
 
     WS_URL = "wss://fstream.binance.com/ws/"
@@ -23,11 +59,10 @@ class AccountSynchronizer:
     def __init__(self, rest_client: BinanceRESTClient):
         self.rest_client = rest_client
         self.listen_key: Optional[str] = None
-        self.positions = {}
-        self.balances = {}
-        self.open_orders = {}
+        self.positions: Dict[str, Dict[str, Any]] = {}
+        self.balances: Dict[str, dict] = {}
+        self.open_orders: Dict[str, dict] = {}
 
-        # Callbacks for when position changes
         self.on_position_change: Optional[Callable] = None
         self.on_order_update: Optional[Callable] = None
 
@@ -35,8 +70,20 @@ class AccountSynchronizer:
         self._keepalive_task = None
         self._running = False
 
+    async def fetch_snapshot(self, symbol: str) -> Dict[str, Any]:
+        """REST bootstrap of positions and USDC wallet before WS events arrive."""
+        raw = await self.rest_client.get_positions(symbol)
+        active = [p for p in raw if abs(float(p.get("positionAmt", 0))) > 1e-12]
+        legs = parse_position_legs(active if active else raw)
+        legs["symbol"] = symbol
+        legs["amount"] = legs["long_qty"] - legs["short_qty"]
+        self.positions[symbol] = legs
+        return legs
+
+    def get_leg_snapshot(self, symbol: str) -> Dict[str, Any]:
+        return dict(self.positions.get(symbol, {}))
+
     async def start(self):
-        """Starts the User Data Stream connection and keep-alive loop."""
         self.listen_key = await self.rest_client.get_listen_key()
         if not self.listen_key:
             logger.error(
@@ -50,7 +97,6 @@ class AccountSynchronizer:
         logger.info("AccountSynchronizer started.")
 
     async def stop(self):
-        """Stops the synchronization loops and closes the listen key."""
         self._running = False
         if self._ws_task:
             self._ws_task.cancel()
@@ -63,15 +109,13 @@ class AccountSynchronizer:
             logger.info("AccountSynchronizer stopped.")
 
     async def _keepalive_loop(self):
-        """Pings the REST API every 45 minutes to keep the listen_key active."""
         while self._running:
-            await asyncio.sleep(45 * 60)  # 45 minutes
+            await asyncio.sleep(45 * 60)
             if self.listen_key:
                 logger.info("Sending keep-alive for User Data Stream listen_key...")
                 await self.rest_client.keepalive_listen_key()
 
     async def _websocket_loop(self):
-        """Main WebSocket loop for receiving account updates."""
         ws_endpoint = f"{self.WS_URL}{self.listen_key}"
 
         while self._running:
@@ -95,12 +139,10 @@ class AccountSynchronizer:
                 await asyncio.sleep(5)
 
             if self._running:
-                # Refresh listen key on disconnect
                 logger.info("Refreshing listen key before reconnect...")
                 self.listen_key = await self.rest_client.get_listen_key()
 
     async def _handle_event(self, data: dict):
-        """Routes the WS event to the appropriate handler."""
         event_type = data.get("e")
 
         if event_type == "ACCOUNT_UPDATE":
@@ -109,13 +151,10 @@ class AccountSynchronizer:
             self._handle_order_update(data)
         elif event_type == "listenKeyExpired":
             logger.warning("Listen key expired! Will reconnect immediately.")
-            # Breaking out of the current WS connection will trigger the reconnect loop
 
     def _handle_account_update(self, data: dict):
-        """Parses balance and position updates."""
         update = data.get("a", {})
 
-        # Update Balances
         for bal in update.get("B", []):
             asset = bal["a"]
             self.balances[asset] = {
@@ -124,44 +163,78 @@ class AccountSynchronizer:
                 "balance_change": float(bal["bc"]),
             }
 
-        # Update Positions
+        symbols_touched = set()
         for pos in update.get("P", []):
             symbol = pos["s"]
             amt = float(pos["pa"])
             entry_price = float(pos["ep"])
             unrealized_pnl = float(pos["up"])
+            position_side = (pos.get("ps") or "BOTH").upper()
 
-            self.positions[symbol] = {
-                "amount": amt,
-                "entry_price": entry_price,
+            existing = self.positions.get(symbol, {})
+            long_qty = existing.get("long_qty", 0.0)
+            short_qty = existing.get("short_qty", 0.0)
+            entry_long = existing.get("entry_price_long", 0.0)
+            entry_short = existing.get("entry_price_short", 0.0)
+
+            if position_side == "LONG":
+                long_qty = abs(amt)
+                entry_long = entry_price
+                if abs(amt) < 1e-12:
+                    long_qty = 0.0
+                    entry_long = 0.0
+            elif position_side == "SHORT":
+                short_qty = abs(amt)
+                entry_short = entry_price
+                if abs(amt) < 1e-12:
+                    short_qty = 0.0
+                    entry_short = 0.0
+            else:
+                if amt >= 0:
+                    long_qty, short_qty = abs(amt), 0.0
+                    entry_long, entry_short = entry_price, 0.0
+                else:
+                    long_qty, short_qty = 0.0, abs(amt)
+                    entry_long, entry_short = 0.0, entry_price
+
+            snapshot = {
+                "long_qty": long_qty,
+                "short_qty": short_qty,
+                "entry_price_long": entry_long,
+                "entry_price_short": entry_short,
                 "unrealized_pnl": unrealized_pnl,
-                "margin_type": pos["mt"],
+                "amount": long_qty - short_qty,
+                "margin_type": pos.get("mt"),
+                "position_side": position_side,
             }
+            self.positions[symbol] = snapshot
+            symbols_touched.add(symbol)
 
             logger.info(
-                f"Position Update for {symbol}: Amount={amt}, "
-                f"Entry={entry_price}, UPnL={unrealized_pnl}"
+                f"Position Update {symbol} [{position_side}]: "
+                f"long={long_qty} short={short_qty} UPnL={unrealized_pnl}"
             )
 
+        for symbol in symbols_touched:
             if self.on_position_change:
                 self.on_position_change(symbol, self.positions[symbol])
 
     def _handle_order_update(self, data: dict):
-        """Parses order execution updates."""
         order = data.get("o", {})
         symbol = order["s"]
-        order_id = order["c"]  # Client order ID
-        status = order["X"]  # NEW, FILLED, PARTIALLY_FILLED, CANCELED
+        order_id = order.get("i") or order.get("c")
+        status = order["X"]
         filled_qty = float(order["z"])
         price = float(order["p"])
 
-        self.open_orders[order_id] = {
+        self.open_orders[str(order_id)] = {
             "symbol": symbol,
             "status": status,
             "filled_qty": filled_qty,
             "price": price,
             "side": order["S"],
             "type": order["o"],
+            "position_side": order.get("ps"),
         }
 
         logger.info(
@@ -170,4 +243,4 @@ class AccountSynchronizer:
         )
 
         if self.on_order_update:
-            self.on_order_update(order_id, self.open_orders[order_id])
+            self.on_order_update(str(order_id), self.open_orders[str(order_id)])

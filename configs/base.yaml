@@ -1,45 +1,49 @@
 # APEX System Configuration
-# Phase 1: Core Data & Execution - ETHUSDC 
+# Milestone 1: Execution framework — ETHUSDC
 
 data:
   target_symbol: "ETHUSDC"
-  macro_symbol: "BTCUSDC" # Using USDC pair for structural alignment
+  macro_symbol: "BTCUSDC"
   target_interval: "3m"
   macro_intervals: ["5m", "15m", "30m"]
-  
+
   stream_safety_delay_sec: 1.2
-  
+
+  ingestion:
+    enabled: true
+    initial_backfill_days: 7
+    tick_flush_size: 100
+    funding_poll_sec: 300
+    repair_gaps: true
+
+  market_state:
+    lookback_bars: 200
+
+  loop_interval_sec: 3.0
+
   storage:
     type: "duckdb"
     db_path: "data_lake/apex_market_data.duckdb"
     cache_dir: "data_lake/"
-  
+
   urls:
     vision_base_url: "https://data.binance.vision/data/futures/um"
     rest_klines:
       - "https://fapi.binance.com/fapi/v1/klines"
-    ws_stream: "wss://stream.binance.com:9443/stream"
+    ws_stream: "wss://fstream.binance.com/stream"
     ws_userdata: "wss://fstream.binance.com/ws"
 
 environment:
   initial_capital: 1000
-  
-  # Institutional Zero-Fee Maker Execution
-  transaction_cost_pct: 0.0 # 0% Maker fee on ETHUSDC
-  slippage_k: 0.0 # Strict post-only limit orders
-  slippage_floor: 0.00000 
-  
+  transaction_cost_pct: 0.0
+  slippage_k: 0.0
+  slippage_floor: 0.00000
   drawdown_penalty_weight: 0.1
   tail_risk_penalty: 0.1
-  
   warmup_steps: 80
-  
-  # Time-in-market penalty to force short-term edge execution
-  holding_penalty: 0.0001 
-  
+  holding_penalty: 0.0001
   flat_reward: 0.0001
-  flat_threshold: 0.40 # Wide deadzone to protect against noise-escape pathology
-  
+  flat_threshold: 0.40
   reward_scale: 5.0
 
 funding:
@@ -52,20 +56,64 @@ funding:
 technicals:
   rolling_window: 120
   atr_period: 10
-  
   ema_fast: 20
   ema_trend_short: 10
   ema_trend_long: 50
-  
   alpha_rsv_period: 6
   alpha_causality_period: 6
   macro_vol_z_period: 144
 
+risk:
+  profile: balanced
+
 execution:
-  mode: "maker_only"
+  operator_mode: paper
+  position_mode: hedge
   post_only: true
-  chase_tolerance: 3 # Cancel & Replace if price moves X ticks away
+  chase_tolerance: 3
   max_leverage: 3
   kelly_fraction_cap: 0.3
+  max_daily_drawdown: 0.05
+  max_gross_leverage: 2.0
+  max_net_leverage: 1.0
 
-# (MLOps and PPO blocks will be added in Phase 3)
+paper:
+  enabled: true
+  min_days: 7
+  min_trades: 100
+  min_sharpe: 1.0
+  max_drawdown: 0.08
+
+explainability:
+  journal_path: data_lake/trade_journal.jsonl
+  min_conviction_flat: 0.35
+  max_risk_factors_open: 3
+
+live:
+  enabled: false
+  skip_paper_gate: false
+
+shadow:
+  enabled: false
+  auto_register: true
+  max_parallel_candidates: 2
+  shared_features: true
+
+hedge:
+  enabled: false
+  selection: rule_based
+  min_score: 0.5
+  max_hedge_ratio: 0.35
+  strategies:
+    signal_disagreement: { enabled: true }
+    regime_straddle: { enabled: true, straddle_size_fraction: 0.25 }
+    protective_hedge: { enabled: true, min_risk_factors: 2, hedge_fraction: 0.25 }
+    eth_btc_rs_hedge: { enabled: true, zscore_entry: 1.5 }
+    sweep_dual_leg: { enabled: true, sweep_lookback_bars: 3 }
+    maker_grid_hedge: { enabled: true, grid_levels: 3, grid_spacing_ticks: 2 }
+    funding_bias_hedge: { enabled: true, funding_extreme: 0.0003 }
+  bandit:
+    min_decisions: 500
+    reward_horizon_bars: 5
+    exploration_factor: 0.1
+    state_path: data_lake/hedge_bandit/state.json

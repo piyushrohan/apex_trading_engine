@@ -1,0 +1,25 @@
+# Risk profiles merged into runtime config via config_loader (risk.profile key).
+
+conservative:
+  max_leverage: 2.0
+  max_daily_drawdown: 0.03
+  kelly_fraction_cap: 0.2
+  max_gross_leverage: 1.5
+  max_net_leverage: 0.75
+  max_hedge_ratio: 0.25
+
+balanced:
+  max_leverage: 3.0
+  max_daily_drawdown: 0.05
+  kelly_fraction_cap: 0.3
+  max_gross_leverage: 2.0
+  max_net_leverage: 1.0
+  max_hedge_ratio: 0.35
+
+aggressive:
+  max_leverage: 5.0
+  max_daily_drawdown: 0.08
+  kelly_fraction_cap: 0.4
+  max_gross_leverage: 3.0
+  max_net_leverage: 1.5
+  max_hedge_ratio: 0.5
