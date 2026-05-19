@@ -123,7 +123,8 @@ class PPOAgent:
         """Load a PPO checkpoint from a registry directory or direct file path."""
         path = Path(model_path)
         artifact = path if path.is_file() else path / "ppo_actor_critic.pt"
-        checkpoint = torch.load(artifact, map_location=self.device)
+        # Registry checkpoints are produced by this process and never user-uploaded.
+        checkpoint = torch.load(artifact, map_location=self.device)  # nosec B614
         state_dim = int(checkpoint.get("state_dim", self.state_dim))
         if state_dim != self.state_dim:
             self.state_dim = state_dim

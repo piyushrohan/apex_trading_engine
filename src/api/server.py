@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -146,7 +147,7 @@ def main():
     )
     uvicorn.run(
         "src.api.server:app",
-        host="0.0.0.0",
+        host=os.getenv("APEX_API_HOST", "127.0.0.1"),
         port=8080,
         reload=False,
     )

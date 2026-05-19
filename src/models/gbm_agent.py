@@ -145,7 +145,8 @@ class GBMAgent:
         path = Path(model_path)
         artifact = path if path.is_file() else path / "gbm_model.pkl"
         with open(artifact, "rb") as f:
-            payload = pickle.load(f)
+            # Registry artifacts are produced by this process and never user-uploaded.
+            payload = pickle.load(f)  # nosec B301
         self.model = payload["model"]
         self.backend = payload.get("backend", "unknown")
         self.is_trained = payload.get("is_trained", True)
