@@ -10,3 +10,12 @@ def test_metrics_wrapper_times_callable():
     assert result == 5
     metrics.set_pnl("paper", "primary", "primary", 12.0)
     metrics.set_ws_health("paper", True)
+
+
+@pytest.mark.unit
+def test_metrics_instances_are_isolated():
+    first = ApexMetrics()
+    second = ApexMetrics()
+
+    first.set_pnl("paper", "primary", "primary", 12.0)
+    second.set_pnl("paper", "shadow", "candidate", -3.5)

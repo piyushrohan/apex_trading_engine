@@ -14,52 +14,61 @@ class _NoopMetric:
 
 
 try:
-    from prometheus_client import Gauge, Histogram, start_http_server
+    from prometheus_client import CollectorRegistry, Gauge, Histogram, start_http_server
 except Exception:  # pragma: no cover - exercised only without optional dependency
-    Gauge = Histogram = None
+    CollectorRegistry = Gauge = Histogram = None
 
-    def start_http_server(port: int) -> None:
+    def start_http_server(port: int, **kwargs: Any) -> None:
         return None
 
 
 class ApexMetrics:
     """Thin wrapper around Prometheus metrics with a safe no-op fallback."""
 
-    def __init__(self):
+    def __init__(self, registry: Any = None):
         self._server_started = False
-        if Gauge is None or Histogram is None:
+        self._registry = None
+        if Gauge is None or Histogram is None or CollectorRegistry is None:
             self.paper_live_pnl = _NoopMetric()
             self.inference_latency = _NoopMetric()
             self.ws_connected = _NoopMetric()
             self.paper_fill_rate = _NoopMetric()
             return
 
+        self._registry = registry or CollectorRegistry()
         self.paper_live_pnl = Gauge(
             "apex_pnl_usdc",
             "Current PnL in USDC by operator mode and book.",
             ["mode", "book_role", "book_id"],
+            registry=self._registry,
         )
         self.inference_latency = Histogram(
             "apex_inference_latency_seconds",
             "Model inference latency by operator mode.",
             ["mode"],
+            registry=self._registry,
         )
         self.ws_connected = Gauge(
             "apex_ws_connected",
             "Market data websocket/ingestion health, 1 for connected/enabled.",
             ["mode"],
+            registry=self._registry,
         )
         self.paper_fill_rate = Gauge(
             "apex_paper_fill_rate",
             "Paper maker fill rate by operator mode and book.",
             ["mode", "book_id"],
+            registry=self._registry,
         )
 
     def start_server(self, port: int = 9108) -> None:
         if self._server_started:
             return
         try:
-            start_http_server(port)
+            if self._registry is None:
+                start_http_server(port)
+            else:
+                start_http_server(port, registry=self._registry)
             self._server_started = True
         except OSError:
             self._server_started = True
