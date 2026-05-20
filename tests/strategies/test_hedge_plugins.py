@@ -161,3 +161,63 @@ def test_registry_registers_all_seven_hedge_plugins(mock_config):
         "maker_grid_hedge",
         "funding_bias_hedge",
     }
+
+
+@pytest.mark.unit
+def test_protective_hedge_low_risk_and_short_position_paths(mock_config):
+    strat = ProtectiveHedgeStrategy(mock_config)
+    low = _ctx(primary_long_qty=0.5, risk_factors=["spread"])
+    short = _ctx(primary_short_qty=0.5, risk_factors=["spread", "sweep"])
+
+    assert strat.score(low) == 0.2
+    proposal = strat.propose(short)
+    assert proposal.long_delta_qty > 0
+    assert proposal.short_delta_qty == 0.0
+
+
+@pytest.mark.unit
+def test_maker_grid_negative_scoring_branches(mock_config):
+    strat = MakerGridHedgeStrategy(mock_config)
+
+    assert strat.score(_ctx(regime="STRONG_TREND_UP")) == 0.12
+    assert strat.score(_ctx(trend_slope=0.01)) == 0.2
+    assert strat.score(_ctx(extra={"spread_bps": 10.0})) == 0.25
+    assert strat.score(_ctx(volatility_zscore=0.9)) == 0.45
+
+
+@pytest.mark.unit
+def test_signal_disagreement_missing_probs_and_directional_hedges(mock_config):
+    strat = SignalDisagreementStrategy(mock_config)
+
+    assert strat.score(_ctx(ppo_action_probs=[], gbm_action_probs=[])) == 0.15
+    assert (
+        strat.score(
+            _ctx(
+                regime="STRONG_TREND_UP",
+                ppo_action_probs=[0.8, 0.1, 0.1],
+                gbm_action_probs=[0.1, 0.1, 0.8],
+            )
+        )
+        == 0.25
+    )
+    long_hedge = strat.propose(
+        _ctx(ppo_action_probs=[0.8, 0.1, 0.1], gbm_action_probs=[0.1, 0.1, 0.8])
+    )
+    short_hedge = strat.propose(
+        _ctx(ppo_action_probs=[0.1, 0.1, 0.8], gbm_action_probs=[0.8, 0.1, 0.1])
+    )
+
+    assert long_hedge.long_delta_qty > 0
+    assert short_hedge.short_delta_qty > 0
+
+
+@pytest.mark.unit
+def test_funding_bias_long_side_and_strong_trend_penalty(mock_config):
+    strat = FundingBiasHedgeStrategy(mock_config)
+    ctx = _ctx(funding_rate=-0.0006, primary_action=2, trend_slope=0.02)
+
+    assert strat.score(ctx) >= 0.58
+    assert strat._mild_trend_agreement(ctx) is False
+    proposal = strat.propose(ctx)
+    assert proposal.long_delta_qty > 0
+    assert proposal.short_delta_qty == 0.0
