@@ -72,9 +72,18 @@ def generate_paper_report(
         .get("storage", {})
         .get("db_path", "data_lake/apex_market_data.duckdb")
     )
-    cache = DuckDBCacheManager(db_path=db_path)
-    equity_df = cache.load_paper_equity_snapshots(book_id)
-    cache.close()
+    if Path(db_path).exists():
+        cache = None
+        try:
+            cache = DuckDBCacheManager(db_path=db_path, read_only=True)
+            equity_df = cache.load_paper_equity_snapshots(book_id)
+        except Exception:
+            equity_df = pd.DataFrame()
+        finally:
+            if cache is not None:
+                cache.close()
+    else:
+        equity_df = pd.DataFrame()
 
     journal_trades = load_journal_trades(journal_path)
     journal_fills = load_journal_fills(journal_path)

@@ -17,11 +17,13 @@ class DuckDBCacheManager:
     Supports incremental inserts, fast reads, and Parquet backups.
     """
 
-    def __init__(self, db_path: str = "data_lake/apex.duckdb"):
+    def __init__(self, db_path: str = "data_lake/apex.duckdb", read_only: bool = False):
         self.db_path = db_path
+        self.read_only = read_only
         self._ensure_directories()
-        self.conn = duckdb.connect(self.db_path)
-        self._init_schemas()
+        self.conn = duckdb.connect(self.db_path, read_only=read_only)
+        if not read_only:
+            self._init_schemas()
 
     def _ensure_directories(self):
         """Ensures that the DuckDB and parquet data lake directories exist."""
