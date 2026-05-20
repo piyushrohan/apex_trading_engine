@@ -130,6 +130,10 @@ apex_trading_engine/
 
 ## Quick Start
 
+For a full operator guide covering architecture, startup, frontend/backend use,
+training, configuration, model logic, and live safety, read
+[APEX User Manual](docs/USER_MANUAL.md).
+
 ### 1. Create The Environment
 
 Recommended bootstrap:

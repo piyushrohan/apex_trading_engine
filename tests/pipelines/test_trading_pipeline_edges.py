@@ -42,8 +42,10 @@ class FakeRisk:
         self.is_kill_switch_active = False
         self.equity_updates = []
         self.orders = []
+        self.kelly_inputs = []
 
     def calculate_kelly_size(self, win_rate, win_loss_ratio, conviction):
+        self.kelly_inputs.append((win_rate, win_loss_ratio, conviction))
         return 0.25
 
     def approve_order(self, side, fraction, **kwargs):
@@ -84,6 +86,14 @@ def build_shell_pipeline(tmp_path, *, mode="paper", position_mode="hedge"):
         },
         "execution": {"operator_mode": mode, "position_mode": position_mode},
         "environment": {"initial_capital": 1000.0},
+        "explainability": {"journal_path": str(tmp_path / "trade_journal.jsonl")},
+        "mlops": {
+            "calibration": {
+                "min_samples": 20,
+                "default_win_rate": 0.55,
+                "default_win_loss_ratio": 1.2,
+            }
+        },
         "shadow": {"decision_log_path": str(tmp_path / "decisions.jsonl")},
     }
     pipeline.operator_mode = mode
@@ -111,6 +121,7 @@ def build_shell_pipeline(tmp_path, *, mode="paper", position_mode="hedge"):
     pipeline.rest_client = MagicMock()
     pipeline.rest_client.close = AsyncMock()
     pipeline.explainability = MagicMock()
+    pipeline.explainability.trade_journal_path = str(tmp_path / "trade_journal.jsonl")
     pipeline.explainability.decode_portfolio_state.return_value = {
         "event": "portfolio_sync"
     }
@@ -118,6 +129,7 @@ def build_shell_pipeline(tmp_path, *, mode="paper", position_mode="hedge"):
     pipeline._status_store = FakeStatus()
     pipeline._running = False
     pipeline._last_approved_fraction = 0.0
+    pipeline._last_sizing_calibration = None
     pipeline._last_control_command_id = None
     return pipeline
 
@@ -319,6 +331,40 @@ def test_publish_status_and_bandit_decision_logging(tmp_path, monkeypatch):
     assert metrics.pnl[-1][1:3] == ("primary", "primary")
     assert row["hedge"]["selected"] == "protective_hedge"
     assert row["bandit_context"]["primary_size_fraction"] == 0.2
+
+
+@pytest.mark.unit
+def test_approved_fraction_uses_journal_calibration(tmp_path):
+    pipeline = build_shell_pipeline(tmp_path)
+    pipeline.config["mlops"]["calibration"]["min_samples"] = 4
+    journal_rows = [
+        {
+            "timestamp": f"2026-05-20T00:0{idx}:00+00:00",
+            "decision": "LONG",
+            "active_regime": "MEAN_REVERSION",
+            "execution": {"mode": "paper"},
+            "book": {"id": "primary"},
+            "realized_pnl": pnl,
+        }
+        for idx, pnl in enumerate([12.0, -6.0, 18.0, 6.0])
+    ]
+    journal_path = tmp_path / "trade_journal.jsonl"
+    journal_path.write_text(
+        "\n".join(json.dumps(row) for row in journal_rows),
+        encoding="utf-8",
+    )
+
+    approved = pipeline._compute_approved_fraction(2, 0.8, 3500.0, "MEAN_REVERSION")
+    pipeline._publish_status(regime="MEAN_REVERSION", mark_price=3500.0)
+
+    assert approved == 0.2
+    assert pipeline.risk_engine.kelly_inputs == [(0.75, 2.0, 0.8)]
+    assert pipeline._last_sizing_calibration["sample_size"] == 4
+    assert pipeline._last_sizing_calibration["source"] == "journal_realized_pnl"
+    assert (
+        pipeline._status_store.updates[-1]["sizing_calibration"]["win_loss_ratio"]
+        == 2.0
+    )
 
 
 @pytest.mark.asyncio

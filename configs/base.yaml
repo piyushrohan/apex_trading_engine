@@ -110,10 +110,21 @@ mlops:
     max_drawdown: 0.10
     min_profit_factor: 1.0
     min_win_rate: 0.0
+  walk_forward:
+    enabled: true
+    required: false
+    folds: 3
+    min_train_fraction: 0.45
+    min_test_rows: 10
+    min_pass_rate: 0.66
   stress:
     cost_bps: 4.0
     max_drawdown: 0.10
     min_return: 0.0
+  calibration:
+    min_samples: 20
+    default_win_rate: 0.55
+    default_win_loss_ratio: 1.2
 
 promotion:
   min_shadow_trades: 50
