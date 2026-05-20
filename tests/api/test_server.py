@@ -1,5 +1,6 @@
 import json
 import sys
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -617,3 +618,121 @@ def test_history_database_error_paths(client, tmp_path, monkeypatch):
     market = client.get("/history/market").json()
     assert market["ohlcv"] == []
     assert "market unavailable" in market["error"]
+
+
+@pytest.mark.unit
+def test_read_jsonl_missing_and_portfolio_db_error(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    assert server_module._read_jsonl(tmp_path / "missing.jsonl") == []
+
+    db_path = tmp_path / "exists.duckdb"
+    db_path.write_text("placeholder", encoding="utf-8")
+    server_module._config = None
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "data": {"storage": {"db_path": str(db_path)}},
+            "paper": {},
+            "live": {},
+        },
+    )
+
+    class FailingCache:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def load_paper_equity_snapshots(self, book_id):
+            raise RuntimeError("portfolio db unavailable")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(server_module, "DuckDBCacheManager", FailingCache)
+
+    body = client.get("/portfolio").json()
+
+    assert body["paper_snapshots"] == 0
+    assert body["latest_equity_from_db"] is None
+
+
+@pytest.mark.unit
+def test_model_lifecycle_manifest_and_readiness_paths(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"model_id": "model-v1"}), encoding="utf-8")
+
+    class FakeRegistry:
+        registry_data = {
+            "models": {
+                "model-v1": {
+                    "status": "PROD",
+                    "manifest_path": str(manifest),
+                },
+                "model-missing-manifest": {"status": "PROD"},
+            },
+            "active_prod": "model-v1",
+            "active_shadow": "shadow-v1",
+            "events": [{"event": "promoted"}],
+        }
+
+        def production_readiness(self, model_id=None):
+            return {"model_id": model_id or "model-v1", "ready": True}
+
+    def registry_factory(*args, **kwargs):
+        if kwargs:
+            raise TypeError("legacy registry")
+        return FakeRegistry()
+
+    fake_tracker = SimpleNamespace(
+        from_config=lambda config: SimpleNamespace(
+            list_runs=lambda limit=25: [{"run_id": "run-1", "limit": limit}]
+        )
+    )
+    server_module._config = None
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "mlops": {"registry_dir": str(tmp_path / "models")},
+            "paper": {},
+            "live": {},
+        },
+    )
+    monkeypatch.setattr(server_module, "ModelRegistry", registry_factory)
+    monkeypatch.setattr(server_module, "ExperimentTracker", fake_tracker)
+
+    lifecycle = client.get("/models/lifecycle?limit=0").json()
+    manifest_body = client.get("/models/model-v1/manifest").json()
+
+    assert lifecycle["production_readiness"]["ready"] is True
+    assert lifecycle["runs"][0]["limit"] == 1
+    assert lifecycle["registry_events"] == [{"event": "promoted"}]
+    assert manifest_body["model_id"] == "model-v1"
+    assert client.get("/models/missing/manifest").status_code == 404
+    assert client.get("/models/model-missing-manifest/manifest").status_code == 404
+    assert server_module._production_readiness(FakeRegistry())["ready"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_ws_status_logs_disconnect():
+    import src.api.server as server_module
+
+    class DisconnectingWebSocket:
+        def __init__(self):
+            self.accepted = False
+
+        async def accept(self):
+            self.accepted = True
+
+        async def send_json(self, payload):
+            raise server_module.WebSocketDisconnect()
+
+    websocket = DisconnectingWebSocket()
+
+    await server_module.ws_status(websocket)
+
+    assert websocket.accepted is True
