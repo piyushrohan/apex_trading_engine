@@ -100,6 +100,7 @@ make test-risk
 - Static frontend terminal in `frontend/` reads API status, explainability, portfolio, and metrics views.
 - Paper report summarizes paper equity snapshots, Sharpe, max drawdown, directional decisions, fills, and fill rate.
 - Hedge report aggregates selected strategies, score observations, average score, and hedge PnL.
+- Operational automation reports cover paper health, shadow lane sanity, model governance, experiment ledger audit, frontend/API contract smoke, and DuckDB freshness/integrity.
 - Prometheus-compatible metrics expose inference latency, PnL, paper fill rate, and ingestion health.
 
 ## Repository Structure
@@ -294,6 +295,36 @@ Hedge attribution report:
 ```bash
 python -m src.reports.hedge_report --days 7 --config configs/base.yaml
 ```
+
+Operational automation reports:
+
+```bash
+python -m src.reports.paper_health_watchdog --config configs/base.yaml --format markdown
+python -m src.reports.shadow_sanity_monitor --config configs/base.yaml --format markdown
+python -m src.reports.model_governance_report --config configs/base.yaml --format markdown
+python -m src.reports.experiment_ledger_auditor --config configs/base.yaml --format markdown
+python -m src.reports.frontend_api_contract_smoke --format markdown
+python -m src.reports.data_freshness_check --config configs/base.yaml --format markdown
+```
+
+Strict watchdog mode for an active paper/shadow/training/data session:
+
+```bash
+python -m src.reports.paper_health_watchdog --config configs/base.yaml --strict
+python -m src.reports.shadow_sanity_monitor --config configs/base.yaml --strict
+python -m src.reports.experiment_ledger_auditor --config configs/base.yaml --strict
+python -m src.reports.data_freshness_check --config configs/base.yaml --strict
+```
+
+To smoke-test the terminal against a running API:
+
+```bash
+python -m src.api.server
+python -m src.reports.frontend_api_contract_smoke --live-api --format markdown
+```
+
+The scheduled GitHub workflow is `.github/workflows/operational-automations.yml`.
+More detail is in [Operational Automations](docs/OPERATIONAL_AUTOMATIONS.md).
 
 ### 8. Run MLOps Retraining
 

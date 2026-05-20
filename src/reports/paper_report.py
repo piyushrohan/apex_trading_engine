@@ -37,7 +37,10 @@ def load_journal_trades(journal_path: str, mode: str = "paper") -> List[dict]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if row.get("execution", {}).get("mode") != mode:
             continue
         if row.get("decision") in ("LONG", "SHORT"):
@@ -53,7 +56,10 @@ def load_journal_fills(journal_path: str, mode: str = "paper") -> List[dict]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if row.get("execution", {}).get("mode") != mode:
             continue
         if row.get("event") == "paper_fill":
