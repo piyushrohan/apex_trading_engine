@@ -103,6 +103,7 @@
       equity: { items: [], total: 0 },
       market: { ohlcv: [], market: [] },
       models: { models: {} },
+      lifecycle: { runs: [], production_readiness: { blockers: [] } },
       promotion: null,
       logs: { files: [] },
       audit: { items: [], total: 0 },
@@ -134,6 +135,7 @@
           equity,
           market,
           models,
+          lifecycle,
           promotion,
           logs,
           audit,
@@ -152,6 +154,10 @@
           getJson(`${apiBase}/history/equity?limit=500`, { items: [], total: 0 }),
           getJson(`${apiBase}/history/market?limit=160`, { ohlcv: [], market: [] }),
           getJson(`${apiBase}/models`, { models: {} }),
+          getJson(`${apiBase}/models/lifecycle?limit=12`, {
+            runs: [],
+            production_readiness: { blockers: [] },
+          }),
           getJson(`${apiBase}/models/promotion/status`, null),
           getJson(`${apiBase}/logs/runtime?limit=80`, { files: [] }),
           getJson(`${apiBase}/audit?limit=80`, { items: [], total: 0 }),
@@ -169,6 +175,7 @@
           equity,
           market,
           models,
+          lifecycle,
           promotion,
           logs,
           audit,
@@ -569,9 +576,62 @@
     const models = state.models?.models || {};
     const rows = Object.keys(models).map((id) => ({ model_id: id, ...models[id] }));
     const promotion = state.promotion || {};
+    const lifecycle = state.lifecycle || {};
+    const readiness =
+      lifecycle.production_readiness
+      || state.models?.production_readiness
+      || { blockers: [] };
+    const blockers = readiness.blockers || [];
+    const runs = lifecycle.runs || [];
     return h(
       "section",
-      { className: "layout one-one" },
+      { className: "stack" },
+      h(
+        "div",
+        { className: "layout one-one" },
+        h(Panel, { title: "Production Readiness", accent: readiness.ready ? "ok" : "danger" },
+          h(KpiGrid, {
+            items: [
+              ["Ready", readiness.ready ? "YES" : "NO"],
+              ["Model", readiness.model_id || "-"],
+              ["Status", readiness.status || "-"],
+              ["Manifest", readiness.manifest_exists ? "present" : "missing"],
+              ["Artifact", readiness.artifact_exists ? "present" : "missing"],
+              ["Blockers", blockers.length],
+            ],
+          }),
+          h(
+            "div",
+            { className: "pill-row" },
+            ...(blockers.length
+              ? blockers.map((blocker) =>
+                  h(StatusPill, { key: blocker, label: blocker, tone: "danger" })
+                )
+              : [h(StatusPill, { key: "clear", label: "live gate clear", tone: "ok" })])
+          )
+        ),
+        h(Panel, { title: "Lifecycle Discipline" },
+          h(KpiGrid, {
+            items: [
+              ["Live Requires Prod", String(Boolean(lifecycle.discipline?.live_requires_prod))],
+              ["Required Status", lifecycle.discipline?.prod_requires_status || "PROD"],
+              ["Manifest Required", String(Boolean(lifecycle.discipline?.prod_requires_manifest))],
+              ["Artifact Required", String(Boolean(lifecycle.discipline?.prod_requires_artifact))],
+            ],
+          }),
+          h(
+            "div",
+            { className: "pill-row" },
+            ...(
+              lifecycle.discipline?.promotion_ladder
+              || ["CANDIDATE", "EVALUATING", "SHADOW", "APPROVED", "PROD"]
+            ).map((stage) => h(StatusPill, { key: stage, label: stage, tone: "neutral" }))
+          )
+        )
+      ),
+      h(
+        "div",
+        { className: "layout one-one" },
       h(Panel, { title: "Registry" },
         h(KpiGrid, {
           items: [
@@ -594,6 +654,20 @@
           ],
         }),
         h("pre", { className: "json-box" }, JSON.stringify(promotion, null, 2))
+      )
+      ),
+      h(Panel, { title: "Experiment Runs" },
+        h(Table, {
+          rows: runs.map((run) => ({
+            run_id: run.run_id,
+            run_type: run.run_type,
+            status: run.status,
+            model_id: run.model_id || "-",
+            started_at: run.started_at,
+            completed_at: run.completed_at || "-",
+          })),
+          columns: ["run_id", "run_type", "status", "model_id", "started_at", "completed_at"],
+        })
       )
     );
   }

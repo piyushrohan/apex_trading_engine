@@ -257,13 +257,13 @@ Legend: **Status** = `DONE` | `PARTIAL` | `MISSING`
 
 | ID | Requirement | Status | Priority | What needs to be done |
 |----|-------------|--------|----------|------------------------|
-| G1 | Pipeline: train → validate → backtest → stress → paper → shadow → rank → promote | PARTIAL | P1 | Implement orchestrator script; replace CI `echo` stubs. |
-| G2 | Model registry + versioning + metadata | PARTIAL | P1 | Add artifact paths, git hash, data snapshot id, hyperparams. |
-| G3 | Reproducibility (seeds, data version) | MISSING | P1 | Manifest per training run in `data_lake/models/{id}/manifest.json`. |
+| G1 | Pipeline: train → validate → backtest → stress → paper → shadow → rank → promote | PARTIAL | P1 | `ModelLifecycleOrchestrator` and auto-retrain now cover train/evaluate/stress/register/shadow and promotion review; remaining work is richer rank dashboards and scheduled CI orchestration. |
+| G2 | Model registry + versioning + metadata | DONE | P1 | Registry tracks lifecycle events, artifact paths, git hash, data snapshot id, data checksum, config hash, feature version, and hyperparams. |
+| G3 | Reproducibility (seeds, data version) | DONE | P1 | Immutable manifest per training run in `data_lake/models/{id}/manifest.json`, plus append-only experiment run ledger. |
 | G4 | Shadow sub-lane parallel to primary (not a third mode) | PARTIAL | P1 | `ShadowLaneRunner` + shared `PaperExecutionAdapter`; runs under paper or live operator mode. |
 | G5 | Auto-promotion safety gates | PARTIAL | P1 | Compare shadow book vs primary prod metrics; independent of operator paper→live gate. |
-| G6 | Automatic rollback | MISSING | P1 | On live underperformance vs prod baseline → revert registry `active_prod`. |
-| G7 | Experiment tracking | MISSING | P2 | MLflow or simple SQLite experiment DB. |
+| G6 | Automatic rollback | DONE | P1 | `PromotionService.rollback_if_live_breach` restores `previous_prod` when live metrics breach configured drawdown or Sharpe limits. |
+| G7 | Experiment tracking | DONE | P2 | Append-only JSONL `ExperimentTracker` records retrain/promotion runs, steps, metrics, and model ids. |
 
 ---
 

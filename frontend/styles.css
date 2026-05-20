@@ -205,6 +205,13 @@ button:disabled {
   font-size: 12px;
 }
 
+.pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .pill-ok {
   color: var(--accent);
   border-color: rgba(46, 196, 165, 0.45);

@@ -6,6 +6,12 @@ from src.mlops import registry as registry_module
 from src.mlops.registry import ModelRegistry
 
 
+def approve_prod(registry, model_id):
+    registry.promote_to_shadow(model_id)
+    registry.approve_for_prod(model_id, reviewer="test")
+    registry.promote_to_prod(model_id, reviewer="test")
+
+
 @pytest.mark.mlops
 def test_registry_raises_for_unknown_promotions(tmp_path):
     """Verify invalid state transitions fail clearly."""
@@ -32,7 +38,7 @@ def test_registry_returns_active_prod_path(tmp_path):
     registry_dir = tmp_path / "models"
     registry = ModelRegistry(registry_dir=str(registry_dir))
     registry.register_model("prod-v1", "PPO", {"sharpe": 2.0})
-    registry.promote_to_prod("prod-v1")
+    approve_prod(registry, "prod-v1")
 
     assert registry.get_prod_model_path() == str(registry_dir / "prod-v1")
 
@@ -65,6 +71,9 @@ def test_registry_writes_manifest_and_updates_metadata(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="missing"):
         registry.write_model_manifest("missing")
 
+    with pytest.raises(FileExistsError, match="immutable"):
+        registry.write_model_manifest("model-v1")
+
 
 @pytest.mark.mlops
 def test_current_git_hash_returns_output_or_none(monkeypatch):
@@ -96,7 +105,7 @@ def test_registry_metric_status_and_shadow_archival_edges(tmp_path):
     registry.register_model("shadow-v2", "PPO", {"sharpe": 1.1})
 
     registry.update_model_metrics("shadow-v1", {"sharpe": 1.2})
-    registry.set_model_status("shadow-v1", "READY")
+    registry.set_model_status("shadow-v1", "EVALUATING")
     registry.promote_to_shadow("shadow-v1")
     registry.promote_to_shadow("shadow-v2")
 
@@ -107,13 +116,40 @@ def test_registry_metric_status_and_shadow_archival_edges(tmp_path):
     with pytest.raises(ValueError, match="missing"):
         registry.update_model_metrics("missing", {})
     with pytest.raises(ValueError, match="missing"):
-        registry.set_model_status("missing", "READY")
+        registry.set_model_status("missing", "REJECTED")
 
 
 @pytest.mark.mlops
 def test_registry_rollback_without_previous_prod_returns_none(tmp_path):
     registry = ModelRegistry(registry_dir=str(tmp_path / "models"))
     registry.register_model("prod-v1", "GBM", {"sharpe": 1.0})
-    registry.promote_to_prod("prod-v1")
+    approve_prod(registry, "prod-v1")
 
     assert registry.rollback_prod() is None
+
+
+@pytest.mark.mlops
+def test_registry_production_readiness_requires_manifest_artifact_and_metadata(
+    tmp_path, monkeypatch
+):
+    registry = ModelRegistry(registry_dir=str(tmp_path / "models"))
+    model_path = registry.register_model("prod-v1", "GBM", {"sharpe": 2.0})
+    monkeypatch.setattr(
+        ModelRegistry, "_current_git_hash", staticmethod(lambda: "abc123")
+    )
+
+    registry.promote_to_shadow("prod-v1")
+    registry.approve_for_prod("prod-v1", reviewer="test")
+    registry.promote_to_prod("prod-v1", reviewer="test")
+    blocked = registry.production_readiness()
+    assert blocked["ready"] is False
+    assert "missing_manifest" in blocked["blockers"]
+    assert "missing_model_artifact" in blocked["blockers"]
+
+    (tmp_path / "models" / "prod-v1" / "gbm_model.pkl").write_bytes(b"model")
+    registry.write_model_manifest("prod-v1", data_snapshot_id="snapshot-1")
+    ready = registry.production_readiness()
+
+    assert model_path == str(tmp_path / "models" / "prod-v1")
+    assert ready["ready"] is True
+    assert ready["blockers"] == []

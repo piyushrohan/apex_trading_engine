@@ -85,12 +85,28 @@ class PromotionService:
         model_id: str,
         primary_metrics: Dict[str, float],
         shadow_metrics: Dict[str, float],
+        *,
+        reviewer: str = "promotion_service",
     ) -> PromotionDecision:
         decision = self.evaluate(model_id, primary_metrics, shadow_metrics)
         if decision.action == "promote":
-            self.registry.promote_to_prod(model_id)
+            self.registry.approve_for_prod(
+                model_id,
+                reviewer=reviewer,
+                reason=decision.reason,
+            )
+            self.registry.promote_to_prod(
+                model_id,
+                reviewer=reviewer,
+                reason=decision.reason,
+            )
         elif decision.action == "discard":
-            self.registry.set_model_status(model_id, "REJECTED")
+            self.registry.set_model_status(
+                model_id,
+                "REJECTED",
+                actor="promotion_service",
+                reason=decision.reason,
+            )
         logger.info("Promotion decision for %s: %s", model_id, decision.reason)
         return decision
 

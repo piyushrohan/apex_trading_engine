@@ -48,6 +48,8 @@ class TradingPipeline:
         self.risk_engine = RiskEngine(config)
         self.registry = ModelRegistry()
         self.meta_controller = MetaController(config)
+        self._model_artifact_loaded = False
+        self._model_readiness: Dict[str, Any] = {}
         model_id = self._load_active_prod_model()
         self.explainability = ExplainabilityEngine(config)
         self.hedge_orchestrator = build_hedge_orchestrator(config)
@@ -130,22 +132,38 @@ class TradingPipeline:
         active = registry_data.get("active_prod")
         models = registry_data.get("models", {})
         if not active or active not in models:
+            self._model_readiness = self._registry_production_readiness(active)
             return "unregistered"
 
         meta = models[active]
         model_path = self.registry.get_model_path(active)
+        self._model_readiness = self._registry_production_readiness(active)
         try:
             self.meta_controller.load_model_artifact(
                 meta.get("type", "GBM"), model_path
             )
+            self._model_artifact_loaded = True
             logger.info("Loaded active production model %s from %s", active, model_path)
         except FileNotFoundError:
+            self._model_artifact_loaded = False
             logger.warning(
                 "Active production model %s has no artifact at %s; using defaults",
                 active,
                 model_path,
             )
         return active
+
+    def _registry_production_readiness(
+        self, model_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        readiness_fn = getattr(self.registry, "production_readiness", None)
+        if readiness_fn:
+            return readiness_fn(model_id)
+        return {
+            "model_id": model_id,
+            "ready": False,
+            "blockers": ["production_readiness_unavailable"],
+        }
 
     def _start_metrics_server(self):
         metrics_cfg = self.config.get("observability", {}).get("metrics", {})
@@ -174,10 +192,36 @@ class TradingPipeline:
     def _validate_startup(self):
         if self.operator_mode != "live":
             return
+        self._validate_live_model_gate()
         validate_live_startup(self.config)
         ok, err = check_api_credentials(self.config)
         if not ok:
             raise RuntimeError(f"Live operator mode blocked: {err}")
+
+    def _validate_live_model_gate(self) -> None:
+        if self.config.get("models", {}).get("allow_unregistered_live", False):
+            logger.warning("Live model gate bypassed by models.allow_unregistered_live")
+            return
+        registry = getattr(self, "registry", None)
+        if registry is None or not hasattr(registry, "production_readiness"):
+            logger.warning("Live model gate skipped: registry readiness unavailable")
+            return
+        readiness = registry.production_readiness(
+            self.primary_book.model_id
+            if self.primary_book.model_id != "unregistered"
+            else None
+        )
+        if (
+            not getattr(self, "_model_artifact_loaded", False)
+            and "missing_model_artifact" not in readiness["blockers"]
+        ):
+            readiness["blockers"].append("missing_model_artifact")
+        if not readiness.get("ready"):
+            blockers = ", ".join(readiness.get("blockers", []))
+            raise RuntimeError(
+                "Live operator mode blocked: no approved production model "
+                f"ready for inference ({blockers})"
+            )
 
     async def _bootstrap_live_account(self):
         if not self.account_sync:

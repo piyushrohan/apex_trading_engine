@@ -1,12 +1,13 @@
 import logging
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
 from src.data.cache_manager import DuckDBCacheManager
 from src.mlops.evaluator import ModelEvaluator
+from src.mlops.experiment_tracker import ExperimentTracker, stable_hash
 from src.mlops.registry import ModelRegistry
 from src.models.gbm_agent import GBMAgent
 from src.models.ppo_agent import PPOAgent
@@ -34,9 +35,25 @@ class AutoRetrainPipeline:
     4. Auto-promotes to SHADOW if successful.
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        *,
+        registry: Optional[ModelRegistry] = None,
+        tracker: Optional[ExperimentTracker] = None,
+    ):
         self.config = config
-        self.registry = ModelRegistry()
+        mlops_cfg = config.get("mlops", {})
+        if registry is not None:
+            self.registry = registry
+        else:
+            try:
+                self.registry = ModelRegistry(
+                    registry_dir=mlops_cfg.get("registry_dir", "data_lake/models")
+                )
+            except TypeError:
+                self.registry = ModelRegistry()
+        self.tracker = tracker or ExperimentTracker.from_config(config)
         self.evaluator = ModelEvaluator(config)
         self.cache = DuckDBCacheManager(
             config.get("data", {})
@@ -47,6 +64,17 @@ class AutoRetrainPipeline:
     def execute_nightly_retrain(self):
         """Main execution flow for the cron job."""
         logger.info("Starting Nightly Auto-Retrain Pipeline...")
+        run = self.tracker.start_run(
+            "candidate_retrain",
+            metadata={
+                "config_hash": stable_hash(self.config),
+                "candidate_model_type": self.config.get("mlops", {}).get(
+                    "candidate_model_type", "GBM"
+                ),
+            },
+        )
+        run_id = run["run_id"]
+        new_model_id = None
         try:
             symbol = self.config.get("data", {}).get("target_symbol", "ETHUSDC")
             interval = self.config.get("data", {}).get("target_interval", "3m")
@@ -60,7 +88,24 @@ class AutoRetrainPipeline:
                     len(raw),
                     min_rows,
                 )
-                return {"status": "skipped", "reason": "insufficient_data"}
+                self.tracker.complete_run(
+                    run_id,
+                    "SKIPPED",
+                    metadata={"reason": "insufficient_data", "rows": len(raw)},
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "insufficient_data",
+                    "run_id": run_id,
+                }
+
+            data_metadata = self._data_snapshot_metadata(raw)
+            self.tracker.log_step(
+                run_id,
+                "data_snapshot",
+                "PASSED",
+                metadata=data_metadata,
+            )
 
             dataset = self._build_supervised_dataset(raw)
             split_idx = max(int(len(dataset) * 0.7), 1)
@@ -80,11 +125,25 @@ class AutoRetrainPipeline:
                 train_df[self._feature_columns()].to_numpy(),
                 train_df["label"].to_numpy(),
             )
+            self.tracker.log_step(
+                run_id,
+                "train",
+                "PASSED",
+                metrics=train_metrics,
+                metadata={"model_id": new_model_id, "model_type": model_type},
+            )
 
             metadata = {
+                "run_id": run_id,
                 "data_rows": int(len(raw)),
                 "train_rows": int(len(train_df)),
                 "oos_rows": int(len(oos_df)),
+                "data_snapshot_id": data_metadata["data_snapshot_id"],
+                "data_checksum": data_metadata["data_checksum"],
+                "feature_version": self.config.get("mlops", {}).get(
+                    "feature_version", "v1"
+                ),
+                "config_hash": stable_hash(self.config),
             }
             try:
                 model_path = self.registry.register_model(
@@ -95,42 +154,111 @@ class AutoRetrainPipeline:
                 )
             except TypeError:
                 model_path = self.registry.register_model(
-                    new_model_id, model_type, {"training": train_metrics}
+                    new_model_id,
+                    model_type,
+                    {"training": train_metrics},
                 )
             agent.save(model_path)
+            try:
+                self.registry.set_model_status(
+                    new_model_id,
+                    "EVALUATING",
+                    actor="auto_retrain",
+                    reason="artifact_saved",
+                )
+            except TypeError:
+                self.registry.set_model_status(new_model_id, "EVALUATING")
 
             logger.info("Evaluating candidate model Out-Of-Sample...")
             backtest = BacktestEngine(self.config)
             backtest.meta_controller = CandidateController(agent)
             pnl_series, trade_history = backtest.run(self._to_backtest_frame(oos_df))
             metrics = self.evaluator.evaluate_oos(pnl_series, trade_history)
+            if hasattr(self.evaluator, "evaluate_stress"):
+                stress_metrics = self.evaluator.evaluate_stress(
+                    pnl_series, trade_history
+                )
+            else:
+                stress_metrics = {"stress_passed": metrics.get("passed_safety", False)}
             metrics["training"] = train_metrics
+            metrics["stress"] = stress_metrics
             self.registry.update_model_metrics(new_model_id, metrics)
+            self.tracker.log_step(
+                run_id,
+                "oos_backtest",
+                "PASSED" if metrics.get("passed_safety") else "FAILED",
+                metrics=metrics,
+                metadata={"model_id": new_model_id},
+            )
+            self.tracker.log_step(
+                run_id,
+                "stress",
+                "PASSED" if stress_metrics.get("stress_passed") else "FAILED",
+                metrics=stress_metrics,
+                metadata={"model_id": new_model_id},
+            )
             if hasattr(self.registry, "write_model_manifest"):
                 self.registry.write_model_manifest(
                     new_model_id,
-                    data_snapshot_id=self._data_snapshot_id(raw),
+                    data_snapshot_id=data_metadata["data_snapshot_id"],
                     hyperparams=self.config.get("models", {}).get(
                         model_type.lower(), {}
                     ),
                     metrics=metrics,
                 )
 
-            if metrics.get("passed_safety", False):
+            passed_all = bool(
+                metrics.get("passed_safety", False)
+                and stress_metrics.get("stress_passed", False)
+            )
+            if passed_all:
                 logger.info(
                     "Candidate %s passed safety gates. Promoting to SHADOW.",
                     new_model_id,
                 )
                 self.registry.promote_to_shadow(new_model_id)
+                self.tracker.log_step(
+                    run_id,
+                    "shadow_registration",
+                    "PASSED",
+                    metadata={"model_id": new_model_id},
+                )
             else:
-                self.registry.set_model_status(new_model_id, "REJECTED")
+                try:
+                    self.registry.set_model_status(
+                        new_model_id,
+                        "REJECTED",
+                        actor="auto_retrain",
+                        reason="offline_or_stress_gate_failed",
+                    )
+                except TypeError:
+                    self.registry.set_model_status(new_model_id, "REJECTED")
                 logger.warning(
                     "Candidate %s failed safety gates. Marking REJECTED.",
                     new_model_id,
                 )
 
             logger.info("Nightly Auto-Retrain Pipeline completed.")
-            return {"status": "completed", "model_id": new_model_id, "metrics": metrics}
+            self.tracker.complete_run(
+                run_id,
+                "COMPLETED" if passed_all else "REJECTED",
+                model_id=new_model_id,
+                metrics=metrics,
+            )
+            return {
+                "status": "completed",
+                "model_id": new_model_id,
+                "run_id": run_id,
+                "metrics": metrics,
+            }
+        except Exception as exc:
+            self.tracker.complete_run(
+                run_id,
+                "FAILED",
+                model_id=new_model_id,
+                metadata={"error": str(exc)},
+            )
+            raise
         finally:
             self.cache.close()
 
@@ -199,6 +327,29 @@ class AutoRetrainPipeline:
         start = pd.to_datetime(df["timestamp"].min()).isoformat()
         end = pd.to_datetime(df["timestamp"].max()).isoformat()
         return f"ohlcv:{start}:{end}:{len(df)}"
+
+    def _data_snapshot_metadata(self, df: pd.DataFrame) -> Dict[str, Any]:
+        snapshot_id = self._data_snapshot_id(df)
+        checksum_frame = df.sort_values("timestamp").reset_index(drop=True)
+        checksum = stable_hash(
+            checksum_frame[["timestamp", "open", "high", "low", "close", "volume"]]
+            .astype(str)
+            .to_dict("records")
+        )
+        timestamps = pd.to_datetime(checksum_frame["timestamp"])
+        gaps = 0
+        if len(timestamps) > 2:
+            expected_delta = timestamps.diff().dropna().mode()
+            if not expected_delta.empty:
+                gaps = int((timestamps.diff().dropna() > expected_delta.iloc[0]).sum())
+        return {
+            "data_snapshot_id": snapshot_id,
+            "data_checksum": checksum,
+            "rows": int(len(df)),
+            "start": pd.to_datetime(df["timestamp"].min()).isoformat(),
+            "end": pd.to_datetime(df["timestamp"].max()).isoformat(),
+            "gaps": gaps,
+        }
 
 
 if __name__ == "__main__":

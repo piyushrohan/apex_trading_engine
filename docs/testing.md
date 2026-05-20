@@ -1,6 +1,6 @@
 # APEX Testing And Validation Runbook
 
-This runbook is the operational reference for validating the APEX trading engine locally and understanding the CI gates. It reflects the recent test coverage expansion across REST/WS data paths, ingestion, DuckDB cache behavior, market state, trading pipeline edge paths, MLOps registry/promotion, reports, and contextual hedge bandit logic.
+This runbook is the operational reference for validating the APEX trading engine locally and understanding the CI gates. It reflects the recent test coverage expansion across REST/WS data paths, ingestion, DuckDB cache behavior, market state, trading pipeline edge paths, MLOps registry/promotion, model governance, reports, frontend static checks, and contextual hedge bandit logic.
 
 ## Latest Validated Snapshot
 
@@ -8,8 +8,7 @@ Local validation after the recent coverage work:
 
 ```bash
 make ci-local
-# 227 passed
-# TOTAL 3569 statements, 146 missed, 96% coverage
+# includes formatter/lint/typecheck, frontend static checks, risk tests, main suite, and coverage
 ```
 
 Strict local coverage enforcement:
@@ -19,7 +18,12 @@ venv/bin/pytest -m "not slow and not replay" \
   --cov=src \
   --cov-report=term-missing \
   --cov-fail-under=95
-# Required test coverage of 95% reached. Total coverage: 95.91%
+# Required test coverage of 95% reached.
+#
+# Latest strict full-suite check:
+# venv/bin/pytest tests/ -v --cov=src --cov-fail-under=95 --cov-report=xml
+# 244 passed
+# Total coverage: 95.16%
 ```
 
 Risk gate:
@@ -103,6 +107,7 @@ Execution order:
 make format      -> black src tests; isort src tests
 make lint        -> ruff check src tests; flake8 E9/F63/F7/F82 checks
 make typecheck   -> mypy src/ --ignore-missing-imports || echo warning
+make frontend-test -> node --check frontend/app.js; node --test tests/frontend/*.test.mjs
 make test-risk   -> pytest -m risk
 make test        -> pytest -m "not slow and not replay" -n auto
 make coverage    -> pytest --cov=src --cov-report=html --cov-report=term-missing

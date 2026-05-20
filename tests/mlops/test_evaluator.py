@@ -72,3 +72,33 @@ def test_evaluator_handles_zero_variance_returns(mock_config, mock_trade_history
 
     assert metrics["sharpe"] == 0.0
     assert metrics["passed_safety"] is False
+
+
+@pytest.mark.mlops
+def test_evaluator_stress_gate_handles_empty_pass_and_fail(mock_config):
+    config = dict(mock_config)
+    config["mlops"] = {
+        "stress": {
+            "cost_bps": 1.0,
+            "max_drawdown": 0.20,
+            "min_return": 0.0,
+        }
+    }
+    evaluator = ModelEvaluator(config)
+
+    empty = evaluator.evaluate_stress(pd.Series(dtype=float), [])
+    passing = evaluator.evaluate_stress(
+        pd.Series([1000.0, 1010.0, 1020.0, 1030.0]),
+        [{"pnl": 10.0}, {"pnl": 10.0}],
+    )
+    failing = evaluator.evaluate_stress(
+        pd.Series([1000.0, 900.0, 850.0, 840.0]),
+        [{"pnl": -50.0}] * 4,
+    )
+
+    assert empty["stress_passed"] is False
+    assert empty["reason"] == "insufficient_equity_series"
+    assert passing["stress_passed"] is True
+    assert passing["stressed_return"] > 0
+    assert failing["stress_passed"] is False
+    assert failing["stressed_max_drawdown"] > 0.05

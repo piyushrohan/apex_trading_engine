@@ -97,6 +97,24 @@ live:
   leverage: 3
   margin_type: CROSS
 
+mlops:
+  registry_dir: data_lake/models
+  experiment_log_path: data_lake/mlops/experiments.jsonl
+  min_training_rows: 120
+  candidate_model_type: GBM
+  label_return_threshold: 0.0005
+  feature_version: v1
+  evaluation:
+    min_trades: 50
+    min_sharpe: 1.5
+    max_drawdown: 0.10
+    min_profit_factor: 1.0
+    min_win_rate: 0.0
+  stress:
+    cost_bps: 4.0
+    max_drawdown: 0.10
+    min_return: 0.0
+
 promotion:
   min_shadow_trades: 50
   min_sharpe_delta: 0.15
