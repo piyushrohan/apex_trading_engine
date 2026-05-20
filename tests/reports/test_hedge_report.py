@@ -87,7 +87,11 @@ def test_hedge_report_skips_old_disabled_invalid_and_missing_rows(tmp_path):
     assert _parse_timestamp(None) is None
     assert _parse_timestamp("not-a-date") is None
     assert (
-        generate_hedge_report(str(tmp_path / "missing.jsonl"), days=1)["total_selected"]
+        generate_hedge_report(
+            str(tmp_path / "missing.jsonl"),
+            str(tmp_path / "missing_decisions.jsonl"),
+            days=1,
+        )["total_selected"]
         == 0
     )
 

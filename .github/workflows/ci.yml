@@ -9,6 +9,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+
 jobs:
   security-and-lint:
     name: Code & Dependency Security
@@ -16,17 +21,15 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup Python environment
+        uses: ./.github/actions/setup-python-env
         with:
           python-version: '3.10'
-          cache: 'pip'
-      - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Bandit Security Scan
         run: bandit -r src/ -ll -ii
-      - name: Safety Dependency Scan
-        # Phase 1 targeted ignore: allowing temporarily while we upgrade numpy/pandas
-        run: safety check -r requirements.txt || true
+      - name: Safety Dependency Scan (advisory)
+        continue-on-error: true
+        run: safety check -r requirements.txt
       - name: Flake8 Linting
         run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 
@@ -36,29 +39,25 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup Python environment
+        uses: ./.github/actions/setup-python-env
         with:
           python-version: '3.10'
-          cache: 'pip'
-      - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
-      - name: Mypy Check
-        # Phase 1: Not enforcing strict yet
-        run: mypy src/ --ignore-missing-imports || true
+      - name: Mypy Check (advisory)
+        continue-on-error: true
+        run: mypy src/ --ignore-missing-imports
 
   risk-engine-gate:
     name: 🚨 Risk Engine Safety Gate
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     needs: [security-and-lint, typecheck]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup Python environment
+        uses: ./.github/actions/setup-python-env
         with:
           python-version: '3.10'
-          cache: 'pip'
-      - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Run Risk & Kill-Switch Tests
         run: pytest tests/ -v -m "risk"
 
@@ -66,25 +65,23 @@ jobs:
     name: Core Unit & Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: risk-engine-gate
+    needs: [security-and-lint, typecheck]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup Python environment
+        uses: ./.github/actions/setup-python-env
         with:
           python-version: '3.10'
-          cache: 'pip'
-      - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
-        
+
       - name: Run Core Logic Tests
         run: pytest tests/ -v -m "unit or integration or mlops or chaos"
-        
+
       - name: Granular Coverage Enforcement (Execution/Risk)
         run: pytest tests/ -m "unit or risk" --cov=src/execution --cov-fail-under=95
-        
+
       - name: Global Coverage Enforcement
-        run: pytest tests/ -v --cov=src --cov-fail-under=85 --cov-report=xml
-        
+        run: pytest tests/ -v --cov=src --cov-fail-under=95 --cov-report=xml
+
       - name: Upload Coverage Artifact
         uses: actions/upload-artifact@v4
         with:
