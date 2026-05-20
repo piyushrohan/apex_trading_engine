@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -151,3 +152,38 @@ def test_required_walk_forward_gate_blocks_shadow_promotion(mock_config, monkeyp
     assert walk_forward["passed"] is False
     assert pipeline.registry.shadow_promotions == []
     assert pipeline.registry.status_updates[-1][1] == "REJECTED"
+
+
+@pytest.mark.mlops
+def test_supervised_dataset_keeps_future_returns_out_of_features(mock_config):
+    """Ensure next-bar returns are labels only, never direct feature inputs."""
+    closes = [100.0, 101.0, 99.0, 102.0, 101.0, 103.0]
+    raw = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-05-20", periods=len(closes), freq="3min"),
+            "symbol": "ETHUSDC",
+            "timeframe": "3m",
+            "open": closes,
+            "high": [price + 1 for price in closes],
+            "low": [price - 1 for price in closes],
+            "close": closes,
+            "volume": [100, 110, 105, 120, 115, 130],
+        }
+    )
+    pipeline = AutoRetrainPipeline.__new__(AutoRetrainPipeline)
+    pipeline.config = {**mock_config, "mlops": {"label_return_threshold": 0.005}}
+
+    dataset = pipeline._build_supervised_dataset(raw)
+    close = raw["close"].astype(float)
+    returns = close.pct_change().fillna(0.0)
+    future_returns = close.shift(-1).sub(close).div(close).fillna(0.0)
+
+    assert dataset["feature_3"].tolist() == (returns > 0.005).astype(float).tolist()
+    assert dataset["feature_4"].tolist() == (returns < -0.005).astype(float).tolist()
+    assert np.allclose(
+        dataset["feature_6"],
+        returns.rolling(5, min_periods=1).mean(),
+    )
+    assert (
+        dataset["feature_3"].tolist() != (future_returns > 0.005).astype(float).tolist()
+    )

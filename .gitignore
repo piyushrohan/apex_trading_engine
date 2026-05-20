@@ -25,6 +25,7 @@ data_lake/mlops/
 
 # Models, Artifacts & Logs
 artifacts/
+data_lake/models/*/
 models/*.pt
 models/*.pkl
 logs/

@@ -56,6 +56,12 @@ pip install -r requirements-dev.txt
 pre-commit install
 ```
 
+On macOS, real LightGBM training also needs the OpenMP runtime:
+
+```bash
+brew install libomp
+```
+
 Confirm tooling is available:
 
 ```bash

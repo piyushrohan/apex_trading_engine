@@ -19,6 +19,18 @@ Tracks delivery against [PRODUCTION_CHECKLIST_AND_ROADMAP.md](./PRODUCTION_CHECK
 
 ---
 
+## Backlog — Model Quality / Alpha Discipline
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Remove future leakage from supervised features | DONE | `future_returns` is now used only for labels; training features are causal/current-bar only |
+| Real LightGBM local training stability | DONE | Added `scikit-learn`, macOS `libomp` setup guidance, and safer LightGBM defaults |
+| Forward paper/shadow evidence before PROD | IN_PROGRESS | New candidates should remain SHADOW until paper/live-forward journal evidence confirms offline metrics |
+| Richer alpha feature research | NOT_STARTED | Add order-flow, spread, funding, cross-asset, and regime-aware features without label leakage |
+| Stricter promotion gates after leakage fix | NOT_STARTED | Recalibrate thresholds after realistic retrain metrics replace inflated leaked metrics |
+
+---
+
 ## Milestone 5 — Explainability v2 + API (P0)
 
 | Task | Status | Notes |
@@ -80,7 +92,7 @@ Run the trading pipeline in another terminal so `/status` and `/explain/latest` 
 | GBM train/save/load | DONE | `GBMAgent.train()`, `save()`, `load()` with LightGBM when available and deterministic fallback when native LightGBM libs are unavailable |
 | PPO train/save/load | DONE | `PPOAgent.train()` supervised warm-start plus checkpoint `save()` / `load()` |
 | Registry metric/status updates | DONE | `update_model_metrics()`, `set_model_status()`, `rollback_prod()` |
-| Auto-retrain real data path | DONE | Reads DuckDB OHLCV, builds supervised labels/features, trains candidate, saves artifact, runs OOS backtest, evaluates safety, promotes to SHADOW or rejects |
+| Auto-retrain real data path | DONE | Reads DuckDB OHLCV, builds causal supervised features plus next-bar labels, trains candidate, saves artifact, runs OOS backtest, evaluates safety, promotes to SHADOW or rejects |
 | Shadow lane runner | DONE | `ShadowLaneRunner` runs candidate models through shared `PaperExecutionAdapter` with `book.role=shadow` and logs decisions |
 | TradingPipeline shadow integration | DONE | Pipeline invokes shadow lanes when `shadow.enabled` is true under paper or live operator mode |
 | Promotion service | DONE | `src/mlops/promotion_service.py` compares shadow vs primary metrics and promotes, rejects, or rolls back independently of paper→live gate |

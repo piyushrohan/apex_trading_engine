@@ -143,6 +143,12 @@ bash scripts/setup_dev.sh
 source venv/bin/activate
 ```
 
+On macOS, install the LightGBM OpenMP runtime before training real GBM models:
+
+```bash
+brew install libomp
+```
+
 Manual bootstrap:
 
 ```bash
