@@ -12,6 +12,33 @@
     "Risk",
     "Logs",
   ];
+  const ACTION_LABELS = ["SHORT", "FLAT", "LONG"];
+  const OPERATOR_MODES = ["paper", "live"];
+  const CONFIRMED_COMMANDS = new Set([
+    "kill-switch",
+    "clear-kill-switch",
+    "flatten",
+  ]);
+
+  function commandLabel(command, extra = {}) {
+    const labels = {
+      "kill-switch": "Engage kill switch",
+      "clear-kill-switch": "Clear kill switch",
+      flatten: "Flatten exposure",
+      pause: "Pause pipeline",
+      resume: "Resume pipeline",
+      "set-risk-profile": `Request risk profile: ${extra.profile || "-"}`,
+      "set-mode": `Request mode: ${extra.mode || "-"}`,
+    };
+    return labels[command] || command;
+  }
+
+  function needsConfirmation(command, extra = {}) {
+    return (
+      CONFIRMED_COMMANDS.has(command)
+      || (command === "set-mode" && extra.mode === "live")
+    );
+  }
 
   function num(value, digits = 4) {
     if (value === null || value === undefined || Number.isNaN(Number(value))) {
@@ -64,6 +91,7 @@
     const [reason, setReason] = useState("operator review");
     const [modeRequest, setModeRequest] = useState("paper");
     const [riskProfile, setRiskProfile] = useState("balanced");
+    const [pendingCommand, setPendingCommand] = useState(null);
     const [state, setState] = useState({
       status: null,
       explain: null,
@@ -176,6 +204,26 @@
       }
     }
 
+    function requestCommand(command, extra = {}) {
+      const staged = {
+        command,
+        extra,
+        label: commandLabel(command, extra),
+      };
+      if (needsConfirmation(command, extra)) {
+        setPendingCommand(staged);
+        return;
+      }
+      sendCommand(command, extra);
+    }
+
+    async function confirmPendingCommand() {
+      if (!pendingCommand) return;
+      const staged = pendingCommand;
+      setPendingCommand(null);
+      await sendCommand(staged.command, staged.extra);
+    }
+
     useEffect(() => {
       hydrate();
     }, [apiBase, decisionFilter]);
@@ -244,7 +292,7 @@
             setModeRequest,
             riskProfile,
             setRiskProfile,
-            sendCommand,
+            requestCommand,
           })
         : null,
       activeTab === "Paper" ? h(PaperView, { state }) : null,
@@ -260,7 +308,13 @@
           })
         : null,
       activeTab === "Risk" ? h(RiskView, { state }) : null,
-      activeTab === "Logs" ? h(LogsView, { state }) : null
+      activeTab === "Logs" ? h(LogsView, { state }) : null,
+      h(ConfirmCommandModal, {
+        pendingCommand,
+        reason,
+        onCancel: () => setPendingCommand(null),
+        onConfirm: confirmPendingCommand,
+      })
     );
   }
 
@@ -311,7 +365,7 @@
     setModeRequest,
     riskProfile,
     setRiskProfile,
-    sendCommand,
+    requestCommand,
   }) {
     const status = state.status || {};
     const portfolio = state.portfolio?.runtime || status.portfolio || {};
@@ -364,11 +418,11 @@
         h(
           "div",
           { className: "button-grid" },
-          h("button", { onClick: () => sendCommand("pause") }, "Pause"),
-          h("button", { onClick: () => sendCommand("resume") }, "Resume"),
-          h("button", { className: "danger-button", onClick: () => sendCommand("kill-switch") }, "Kill"),
-          h("button", { onClick: () => sendCommand("clear-kill-switch") }, "Clear kill"),
-          h("button", { className: "danger-button", onClick: () => sendCommand("flatten") }, "Flatten"),
+          h("button", { onClick: () => requestCommand("pause") }, "Pause"),
+          h("button", { onClick: () => requestCommand("resume") }, "Resume"),
+          h("button", { className: "danger-button", onClick: () => requestCommand("kill-switch") }, "Kill"),
+          h("button", { onClick: () => requestCommand("clear-kill-switch") }, "Clear kill"),
+          h("button", { className: "danger-button", onClick: () => requestCommand("flatten") }, "Flatten"),
         ),
         h("label", { className: "field-label" }, "Mode request"),
         h(
@@ -377,11 +431,11 @@
           h(
             "select",
             { className: "field", value: modeRequest, onChange: (e) => setModeRequest(e.target.value) },
-            h("option", { value: "paper" }, "paper"),
-            h("option", { value: "shadow" }, "shadow"),
-            h("option", { value: "live" }, "live")
+            ...OPERATOR_MODES.map((mode) =>
+              h("option", { key: mode, value: mode }, mode)
+            )
           ),
-          h("button", { onClick: () => sendCommand("set-mode", { mode: modeRequest }) }, "Request mode")
+          h("button", { onClick: () => requestCommand("set-mode", { mode: modeRequest }) }, "Request mode")
         ),
         h("label", { className: "field-label" }, "Risk profile request"),
         h(
@@ -392,7 +446,7 @@
             value: riskProfile,
             onChange: (e) => setRiskProfile(e.target.value),
           }),
-          h("button", { onClick: () => sendCommand("set-risk-profile", { profile: riskProfile }) }, "Request risk")
+          h("button", { onClick: () => requestCommand("set-risk-profile", { profile: riskProfile }) }, "Request risk")
         ),
         h("pre", { className: "json-box" }, JSON.stringify(controls, null, 2))
       )
@@ -446,7 +500,10 @@
               ["Model ID", explain?.model_id || "-"],
             ],
           }),
-          h(ProbabilityBars, { values: explain?.raw_action_probs || [] })
+          h(ProbabilityBars, {
+            values: explain?.raw_action_probs || [],
+            decision: explain?.decision,
+          })
         ),
         h(Panel, { title: "Confidence Buckets" },
           h(BarList, {
@@ -661,7 +718,7 @@
       { className: "bars" },
       ...(rows.length
         ? rows.map((row) =>
-            h("div", { className: "bar-row", key: row.name },
+            h("div", { className: row.selected ? "bar-row bar-row-selected" : "bar-row", key: row.name },
               h("div", { className: "bar-label" }, row.name),
               h("div", { className: "bar-track" },
                 h("div", {
@@ -676,15 +733,64 @@
     );
   }
 
-  function ProbabilityBars({ values }) {
-    const labels = ["LONG", "FLAT", "SHORT"];
+  function ProbabilityBars({ values, decision }) {
+    const labels = ACTION_LABELS;
     return h(BarList, {
       rows: values.map((value, idx) => ({
         name: labels[idx] || `A${idx}`,
         value: Number(value || 0),
         detail: pct(value, 2),
+        selected: labels[idx] === decision,
       })),
     });
+  }
+
+  function ConfirmCommandModal({ pendingCommand, reason, onCancel, onConfirm }) {
+    if (!pendingCommand) return null;
+    const hasReason = Boolean(String(reason || "").trim());
+    return h(
+      "div",
+      {
+        className: "modal-backdrop",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-label": "Confirm operator command",
+      },
+      h(
+        "section",
+        { className: "confirm-card" },
+        h("div", { className: "eyebrow" }, "Confirm Operator Command"),
+        h("h2", null, pendingCommand.label),
+        h(
+          "p",
+          { className: "muted" },
+          "This action will be written to the operator ledger and consumed by the runtime loop."
+        ),
+        h(
+          "pre",
+          { className: "json-box" },
+          JSON.stringify(
+            {
+              command: pendingCommand.command,
+              reason,
+              payload: pendingCommand.extra,
+            },
+            null,
+            2
+          )
+        ),
+        h(
+          "div",
+          { className: "confirm-actions" },
+          h("button", { onClick: onCancel }, "Cancel"),
+          h(
+            "button",
+            { className: "danger-button", disabled: !hasReason, onClick: onConfirm },
+            "Confirm"
+          )
+        )
+      )
+    );
   }
 
   function Sparkline({ rows, valueKey, label }) {

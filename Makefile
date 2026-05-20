@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-risk test-integration test-replay coverage lint format typecheck ci-local setup
+.PHONY: test test-unit test-risk test-integration test-replay frontend-test coverage lint format typecheck ci-local setup
 
 # Parallel execution by default for speed, except for strict risk tests
 test:
@@ -15,6 +15,10 @@ test-integration:
 
 test-replay:
 	pytest -m replay
+
+frontend-test:
+	node --check frontend/app.js
+	node --test tests/frontend/*.test.mjs
 
 replay-debug:
 	@echo "Replaying session $${SESSION:-latest}..."
@@ -38,6 +42,7 @@ ci-local:
 	make format
 	make lint
 	make typecheck
+	make frontend-test
 	make test-risk
 	make test
 	make coverage
