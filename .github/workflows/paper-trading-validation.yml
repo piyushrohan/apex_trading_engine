@@ -8,19 +8,21 @@ on:
         required: true
         default: '24'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+
 jobs:
   paper-trading:
     name: Paper Trading Validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup Python environment
+        uses: ./.github/actions/setup-python-env
         with:
           python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
       - name: Run bounded paper validation tests
         run: pytest tests/integration/test_paper_e2e.py tests/pipelines/test_paper_trade.py -q
       - name: Generate paper report

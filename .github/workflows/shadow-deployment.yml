@@ -3,22 +3,26 @@ name: APEX Shadow Deployment
 on:
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+
 jobs:
   shadow-deploy:
     name: Deploy Shadow Model
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup Python environment
+        uses: ./.github/actions/setup-python-env
         with:
           python-version: '3.10'
-          cache: 'pip'
-      - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Validate shadow lane
         run: pytest tests/mlops/test_shadow_lane.py tests/pipelines/test_paper_trade.py -q
       - name: Verify registry has optional shadow model
-        run: python -c "from src.mlops.registry import ModelRegistry; r=ModelRegistry(); print({'active_shadow': r.registry_data.get('active_shadow')})"
+        run: |
+          python -c "from src.mlops.registry import ModelRegistry; r=ModelRegistry(); print({'active_shadow': r.registry_data.get('active_shadow')})"
       - name: Archive shadow artifacts
         uses: actions/upload-artifact@v4
         if: always()
