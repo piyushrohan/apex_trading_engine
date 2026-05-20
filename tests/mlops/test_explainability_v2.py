@@ -66,3 +66,52 @@ def test_decode_portfolio_state_after_sync(mock_config):
     )
     assert payload["event"] == "portfolio_sync"
     assert "Hedged" in payload["summary"]
+
+
+@pytest.mark.mlops
+def test_market_narrative_confidence_and_portfolio_summary_edges(mock_config):
+    engine = ExplainabilityEngine(mock_config)
+
+    high = engine.compute_confidence_buckets(
+        [1.0, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0],
+        action=2,
+        regime="STRONG_TREND_UP",
+        conviction=0.8,
+    )
+    rich_narrative = engine.build_market_narrative(
+        "STRONG_TREND_UP",
+        {
+            "is_sell_liquidity_sweep": True,
+            "eth_btc_zscore": 1.8,
+            "volatility_zscore": 1.2,
+            "funding_rate": 0.0003,
+        },
+    )
+    cheap_narrative = engine.build_market_narrative(
+        "MEAN_REVERSION",
+        {"eth_btc_zscore": -1.9, "volatility_zscore": -1.2},
+    )
+
+    assert high["summary"]["confidence_tier"] == "high"
+    assert any("Sell-side" in line for line in rich_narrative)
+    assert any("ETH rich" in line for line in rich_narrative)
+    assert any("Volatility expansion" in line for line in rich_narrative)
+    assert any("Funding rate elevated" in line for line in rich_narrative)
+    assert any("ETH cheap" in line for line in cheap_narrative)
+    assert any("Volatility compression" in line for line in cheap_narrative)
+    assert engine._portfolio_summary(0.0, 0.0).startswith("Flat")
+    assert engine._portfolio_summary(0.25, 0.0).startswith("Net long")
+    assert engine._portfolio_summary(0.0, 0.5).startswith("Net short")
+
+
+@pytest.mark.mlops
+def test_read_latest_journal_entry_empty_missing_and_malformed(mock_config, tmp_path):
+    engine = ExplainabilityEngine(mock_config)
+    empty = tmp_path / "empty.jsonl"
+    malformed = tmp_path / "malformed.jsonl"
+    empty.write_text("\n", encoding="utf-8")
+    malformed.write_text('{"decision": "LONG"}\n{bad-json', encoding="utf-8")
+
+    assert engine.read_latest_journal_entry(str(tmp_path / "missing.jsonl")) is None
+    assert engine.read_latest_journal_entry(str(empty)) is None
+    assert engine.read_latest_journal_entry(str(malformed)) is None

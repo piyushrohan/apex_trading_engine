@@ -32,6 +32,9 @@ class FakeMetrics:
     def set_paper_fill_rate(self, mode, book_id, fill_rate):
         self.fill_rates.append((mode, book_id, fill_rate))
 
+    def time_inference(self, mode, fn, *args):
+        return fn(*args)
+
 
 class FakeRisk:
     def __init__(self, approvals=None):
@@ -452,6 +455,13 @@ async def test_execute_hedge_places_long_short_and_grid_orders(tmp_path, monkeyp
     )
     pipeline.execution_adapter.place_order.assert_not_awaited()
 
+    pipeline.execution_adapter = FakeAdapter()
+    pipeline.risk_engine = FakeRisk(approvals=[0.0])
+    await pipeline._execute_hedge(
+        HedgeProposal("protective_hedge", short_delta_qty=0.1), 3500.0
+    )
+    pipeline.execution_adapter.place_order.assert_not_awaited()
+
     class FakeGridAdapter:
         def build_grid(self, **kwargs):
             return SimpleNamespace(
@@ -469,6 +479,14 @@ async def test_execute_hedge_places_long_short_and_grid_orders(tmp_path, monkeyp
         3500.0,
     )
     assert pipeline.execution_adapter.place_order.await_count == 2
+
+    pipeline.execution_adapter = FakeAdapter()
+    pipeline.risk_engine = FakeRisk(approvals=[0.0])
+    await pipeline._execute_hedge(
+        HedgeProposal("maker_grid_hedge", long_delta_qty=0.3),
+        3500.0,
+    )
+    pipeline.execution_adapter.place_order.assert_not_awaited()
 
 
 @pytest.mark.unit
@@ -552,3 +570,178 @@ async def test_stop_closes_enabled_components(tmp_path):
     pipeline.rest_client.close.assert_awaited_once()
     pipeline.ingestion.close.assert_called_once()
     pipeline.market_state.close.assert_called_once()
+
+
+@pytest.mark.unit
+def test_live_model_gate_bypass_and_readiness_unavailable(tmp_path):
+    pipeline = build_shell_pipeline(tmp_path, mode="live")
+
+    pipeline.config["models"] = {"allow_unregistered_live": True}
+    pipeline._validate_live_model_gate()
+
+    pipeline.config["models"] = {}
+    pipeline.registry = object()
+    pipeline._validate_live_model_gate()
+
+    readiness = {"ready": True, "blockers": []}
+    pipeline.registry = SimpleNamespace(
+        production_readiness=lambda model_id=None: readiness
+    )
+    pipeline._model_artifact_loaded = False
+    pipeline._validate_live_model_gate()
+
+    assert readiness["blockers"] == ["missing_model_artifact"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_operator_control_edge_paths(tmp_path, monkeypatch):
+    control_path = tmp_path / "operator_controls.json"
+    monkeypatch.setenv("APEX_CONTROL_STATE_PATH", str(control_path))
+    pipeline = build_shell_pipeline(tmp_path)
+
+    await pipeline._bootstrap_live_account()
+    assert pipeline._wallet_equity_from_sync() == 0.0
+
+    control_path.write_text("{not-json", encoding="utf-8")
+    assert pipeline._load_operator_controls() == {"error": "control state unreadable"}
+    assert pipeline._control_command_id({"last_command": {"command": "pause"}}) is None
+
+    pipeline._apply_operator_risk_profile(None)
+
+    def raise_profile(config, profile):
+        raise ValueError("unknown profile")
+
+    monkeypatch.setattr(trading_pipeline, "apply_risk_profile", raise_profile)
+    pipeline._apply_operator_risk_profile("does-not-exist")
+
+    control_path.write_text(
+        json.dumps(
+            {
+                "paused": False,
+                "kill_switch_requested": False,
+                "last_command": {
+                    "timestamp": "2026-05-20T00:00:00+00:00",
+                    "command": "flatten",
+                    "payload": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert await pipeline._apply_operator_controls(None) is False
+
+
+def _loop_snapshot():
+    return {
+        "state_vector": [0.1] * 10,
+        "regime": "MEAN_REVERSION",
+        "mark_price": 3500.0,
+        "eth_btc_zscore": 0.2,
+        "volatility_zscore": 0.3,
+        "trend_slope": 0.01,
+        "is_buy_liquidity_sweep": False,
+        "is_sell_liquidity_sweep": False,
+        "funding_rate": 0.0,
+        "cvd": 1.0,
+        "spread_bps": 0.5,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_trading_loop_empty_snapshot_pause_execute_hedge_and_kill_paths(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(trading_pipeline, "APEX_METRICS", FakeMetrics())
+
+    empty_pipeline = build_shell_pipeline(tmp_path)
+    empty_pipeline._running = True
+    empty_pipeline.config["data"]["loop_interval_sec"] = 0
+
+    def stop_after_empty_snapshot():
+        empty_pipeline._running = False
+        return None
+
+    empty_pipeline.market_state.build_latest.side_effect = stop_after_empty_snapshot
+    await empty_pipeline._trading_loop()
+
+    paused_pipeline = build_shell_pipeline(tmp_path)
+    paused_pipeline._running = True
+    paused_pipeline.config["data"]["loop_interval_sec"] = 0
+    paused_pipeline.market_state.build_latest.return_value = _loop_snapshot()
+
+    async def pause_once(mark_price):
+        paused_pipeline._running = False
+        return True
+
+    paused_pipeline._apply_operator_controls = AsyncMock(side_effect=pause_once)
+    paused_pipeline._publish_status = MagicMock()
+    await paused_pipeline._trading_loop()
+    paused_pipeline._publish_status.assert_called_once()
+
+    hedge_pipeline = build_shell_pipeline(tmp_path)
+    hedge_pipeline._running = True
+    hedge_pipeline.config["data"]["loop_interval_sec"] = 0
+    hedge_pipeline.config["data"]["max_ticks"] = 1
+    hedge_pipeline.market_state.build_latest.return_value = _loop_snapshot()
+    hedge_pipeline._apply_operator_controls = AsyncMock(return_value=False)
+    hedge_pipeline.meta_controller = SimpleNamespace(
+        get_dual_inference=lambda state, regime: (
+            2,
+            0.9,
+            {"action_probs": [0.1, 0.1, 0.8]},
+            [0.1, 0.1, 0.8],
+            [0.2, 0.2, 0.6],
+        )
+    )
+    hedge_pipeline.explainability.decode_decision.return_value = {
+        "primary_reasons": ["trend aligned"],
+        "risk_factors": [],
+    }
+    hedge_pipeline.hedge_orchestrator = SimpleNamespace(
+        evaluate=lambda ctx: (
+            HedgeProposal("protective_hedge", short_delta_qty=0.05),
+            {"enabled": True, "selected": "protective_hedge"},
+        )
+    )
+    hedge_pipeline.shadow_runner = SimpleNamespace(run_tick=AsyncMock())
+    hedge_pipeline.risk_engine = FakeRisk(approvals=[0.2, 0.1])
+    await hedge_pipeline._trading_loop()
+
+    assert hedge_pipeline._last_approved_fraction == 0.2
+    assert hedge_pipeline.execution_adapter.place_order.await_count == 2
+    hedge_pipeline.shadow_runner.run_tick.assert_awaited_once()
+
+    kill_pipeline = build_shell_pipeline(tmp_path)
+    kill_pipeline._running = True
+    kill_pipeline.config["data"]["loop_interval_sec"] = 0
+    kill_pipeline.market_state.build_latest.return_value = _loop_snapshot()
+    kill_pipeline._apply_operator_controls = AsyncMock(return_value=False)
+    kill_pipeline.meta_controller = SimpleNamespace(
+        get_dual_inference=lambda state, regime: (
+            1,
+            0.2,
+            {"action_probs": [0.1, 0.8, 0.1]},
+            [0.1, 0.8, 0.1],
+            [0.2, 0.6, 0.2],
+        )
+    )
+    kill_pipeline.explainability.decode_decision.return_value = {
+        "primary_reasons": [],
+        "risk_factors": [],
+    }
+    kill_pipeline.hedge_orchestrator = SimpleNamespace(
+        evaluate=lambda ctx: (None, {"enabled": False})
+    )
+    kill_pipeline.shadow_runner = SimpleNamespace(run_tick=AsyncMock())
+    kill_pipeline.risk_engine.is_kill_switch_active = True
+
+    async def stop_after_kill(mark_price):
+        kill_pipeline._running = False
+
+    kill_pipeline._handle_kill_switch = AsyncMock(side_effect=stop_after_kill)
+    await kill_pipeline._trading_loop()
+
+    kill_pipeline._handle_kill_switch.assert_awaited_once_with(3500.0)
