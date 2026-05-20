@@ -123,6 +123,34 @@ def test_paper_run_days_uses_snapshot_span(mock_config, monkeypatch):
 
 
 @pytest.mark.unit
+def test_paper_run_days_handles_cache_open_failure(mock_config, monkeypatch):
+    class FailingCache:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(live_gate, "DuckDBCacheManager", FailingCache)
+
+    assert live_gate._paper_run_days(mock_config, "primary") == 0.0
+
+
+@pytest.mark.unit
+def test_paper_run_days_handles_frames_without_timestamps(mock_config, monkeypatch):
+    class NoTimestampCache:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def load_paper_equity_snapshots(self, book_id):
+            return pd.DataFrame({"equity": [1000.0]})
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(live_gate, "DuckDBCacheManager", NoTimestampCache)
+
+    assert live_gate._paper_run_days(mock_config, "primary") == 0.0
+
+
+@pytest.mark.unit
 def test_validate_live_startup_allows_explicit_paper_gate_skip(mock_config):
     mock_config["live"] = {"enabled": True, "skip_paper_gate": True}
 

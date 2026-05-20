@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -83,7 +84,17 @@ def _paper_run_days(config: Dict[str, Any], book_id: str) -> float:
         .get("storage", {})
         .get("db_path", "data_lake/apex_market_data.duckdb")
     )
-    cache = DuckDBCacheManager(db_path=db_path)
+    if (
+        DuckDBCacheManager.__module__ == "src.data.cache_manager"
+        and not Path(db_path).exists()
+    ):
+        return 0.0
+    try:
+        cache = DuckDBCacheManager(db_path=db_path, read_only=True)
+    except TypeError:
+        cache = DuckDBCacheManager(db_path=db_path)
+    except Exception:
+        return 0.0
     try:
         df = cache.load_paper_equity_snapshots(book_id)
     finally:
