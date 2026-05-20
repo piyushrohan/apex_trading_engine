@@ -1,0 +1,100 @@
+name: APEX Operational Automations
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 2 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+
+jobs:
+  operational-watchdogs:
+    name: Paper, Shadow, Governance, Contract, and Data Reports
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python environment
+        uses: ./.github/actions/setup-python-env
+        with:
+          python-version: '3.10'
+
+      - name: Generate paper health watchdog reports
+        run: |
+          python -m src.reports.paper_health_watchdog \
+            --config configs/base.yaml \
+            --format json \
+            --output reports/automation/paper_health.json
+          python -m src.reports.paper_health_watchdog \
+            --config configs/base.yaml \
+            --format markdown \
+            --output reports/automation/paper_health.md
+
+      - name: Generate shadow lane sanity reports
+        run: |
+          python -m src.reports.shadow_sanity_monitor \
+            --config configs/base.yaml \
+            --format json \
+            --output reports/automation/shadow_sanity.json
+          python -m src.reports.shadow_sanity_monitor \
+            --config configs/base.yaml \
+            --format markdown \
+            --output reports/automation/shadow_sanity.md
+
+      - name: Generate daily model governance reports
+        run: |
+          python -m src.reports.model_governance_report \
+            --config configs/base.yaml \
+            --format json \
+            --output reports/automation/model_governance.json
+          python -m src.reports.model_governance_report \
+            --config configs/base.yaml \
+            --format markdown \
+            --output reports/automation/model_governance.md
+
+      - name: Generate experiment ledger audit reports
+        run: |
+          python -m src.reports.experiment_ledger_auditor \
+            --config configs/base.yaml \
+            --format json \
+            --output reports/automation/experiment_ledger_audit.json
+          python -m src.reports.experiment_ledger_auditor \
+            --config configs/base.yaml \
+            --format markdown \
+            --output reports/automation/experiment_ledger_audit.md
+
+      - name: Generate frontend/API contract smoke reports
+        run: |
+          python -m src.reports.frontend_api_contract_smoke \
+            --format json \
+            --output reports/automation/frontend_api_contract.json
+          python -m src.reports.frontend_api_contract_smoke \
+            --format markdown \
+            --output reports/automation/frontend_api_contract.md
+
+      - name: Generate data freshness and DuckDB integrity reports
+        run: |
+          python -m src.reports.data_freshness_check \
+            --config configs/base.yaml \
+            --format json \
+            --output reports/automation/data_freshness.json
+          python -m src.reports.data_freshness_check \
+            --config configs/base.yaml \
+            --format markdown \
+            --output reports/automation/data_freshness.md
+
+      - name: Upload operational automation reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: operational-automation-reports
+          path: reports/automation/
+          if-no-files-found: warn
+          retention-days: 30
