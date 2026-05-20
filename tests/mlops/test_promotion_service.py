@@ -4,12 +4,18 @@ from src.mlops.promotion_service import PromotionService
 from src.mlops.registry import ModelRegistry
 
 
+def approve_prod(registry, model_id):
+    registry.promote_to_shadow(model_id)
+    registry.approve_for_prod(model_id, reviewer="test")
+    registry.promote_to_prod(model_id, reviewer="test")
+
+
 @pytest.mark.mlops
 def test_promotion_service_promotes_shadow_outperformer(tmp_path, mock_config):
     """Verify shadow candidates promote only through the MLOps gate."""
     registry = ModelRegistry(registry_dir=str(tmp_path / "models"))
     registry.register_model("prod-v1", "GBM", {"sharpe": 1.0})
-    registry.promote_to_prod("prod-v1")
+    approve_prod(registry, "prod-v1")
     registry.register_model("shadow-v2", "GBM", {"sharpe": 1.4})
     registry.promote_to_shadow("shadow-v2")
     config = dict(mock_config)
@@ -55,9 +61,9 @@ def test_promotion_service_rolls_back_previous_prod(tmp_path, mock_config):
     """Verify rollback restores the previous production model."""
     registry = ModelRegistry(registry_dir=str(tmp_path / "models"))
     registry.register_model("prod-v1", "GBM", {"sharpe": 1.0})
-    registry.promote_to_prod("prod-v1")
+    approve_prod(registry, "prod-v1")
     registry.register_model("prod-v2", "GBM", {"sharpe": 1.5})
-    registry.promote_to_prod("prod-v2")
+    approve_prod(registry, "prod-v2")
     service = PromotionService(mock_config, registry=registry)
 
     restored = service.rollback_active_prod()
@@ -129,9 +135,9 @@ def test_metrics_from_decision_log_handles_missing_sparse_and_rich_rows(
 def test_rollback_if_live_breach_uses_configured_limits(tmp_path, mock_config):
     registry = ModelRegistry(registry_dir=str(tmp_path / "models"))
     registry.register_model("prod-v1", "GBM", {"sharpe": 1.0})
-    registry.promote_to_prod("prod-v1")
+    approve_prod(registry, "prod-v1")
     registry.register_model("prod-v2", "GBM", {"sharpe": 1.5})
-    registry.promote_to_prod("prod-v2")
+    approve_prod(registry, "prod-v2")
     config = dict(mock_config)
     config["promotion"] = {"max_live_drawdown": 0.05, "min_live_sharpe": 0.0}
     service = PromotionService(config, registry=registry)

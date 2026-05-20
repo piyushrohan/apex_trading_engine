@@ -28,3 +28,10 @@ test("control commands still write confirmed operator intent", () => {
   assert.match(app, /confirm: true/);
   assert.match(app, /postJson\(`\$\{apiBase\}\/control\/\$\{command\}`/);
 });
+
+test("models cockpit exposes governance readiness and lifecycle history", () => {
+  assert.match(app, /\/models\/lifecycle\?limit=12/);
+  assert.match(app, /Production Readiness/);
+  assert.match(app, /Experiment Runs/);
+  assert.match(app, /CANDIDATE", "EVALUATING", "SHADOW", "APPROVED", "PROD"/);
+});

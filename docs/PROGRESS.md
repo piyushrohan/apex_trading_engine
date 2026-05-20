@@ -89,6 +89,7 @@ Run the trading pipeline in another terminal so `/status` and `/explain/latest` 
 | Active PROD loading | DONE | `TradingPipeline` now loads active registry artifacts into the primary `MetaController` before inference |
 | Reproducibility manifests | DONE | Model registry writes `manifest.json` with git hash, data snapshot id, hyperparams, and metrics |
 | Shadow metrics | DONE | Shadow decisions log timestamp, equity, PnL, and bandit context for promotion windows |
+| Model governance discipline | DONE | Registry lifecycle states, experiment run ledger, immutable manifests, configurable gates, and live startup model readiness guard |
 
 ### Milestone 6 exit criteria
 
@@ -99,6 +100,7 @@ Run the trading pipeline in another terminal so `/status` and `/explain/latest` 
 - [x] Shadow lanes run continuously in the shared paper/live `TradingPipeline` loop when `shadow.enabled` is true
 - [x] Hedge T-C plugins and all-seven strategy score logging are complete
 - [x] Train → shadow → promote → rollback paths are covered by automated MLOps tests
+- [x] Live mode refuses unregistered or incomplete production model evidence
 
 ---
 
@@ -167,3 +169,4 @@ venv/bin/pytest -q
 | 2026-05-19 | **Milestone 6 complete** — shadow lanes integrated, hedge T-C plugins registered, and all-seven hedge scores logged |
 | 2026-05-19 | **Milestone 7 complete** — metrics, observability compose, paper CI workflow, maker grid, and hedge attribution report |
 | 2026-05-19 | **Milestones 8–9 complete** — terminal API/frontend, active PROD loading, live prep hardening, partial paper fills, registry manifests, CI workflow wiring, and contextual bandit reward update path |
+| 2026-05-20 | **Model governance hardening** — experiment tracking, strict registry lifecycle, stress gates, readiness API/frontend, and live model evidence guard |

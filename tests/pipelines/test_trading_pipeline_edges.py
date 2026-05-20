@@ -226,6 +226,28 @@ def test_validate_startup_blocks_live_when_credentials_fail(monkeypatch, tmp_pat
     pipeline._validate_startup()
 
 
+@pytest.mark.unit
+def test_validate_startup_blocks_live_without_ready_prod_model(monkeypatch, tmp_path):
+    pipeline = build_shell_pipeline(tmp_path, mode="live")
+    pipeline.primary_book.model_id = "unregistered"
+    pipeline.registry = SimpleNamespace(
+        production_readiness=lambda model_id=None: {
+            "ready": False,
+            "blockers": ["no_active_prod_model"],
+        }
+    )
+    pipeline._model_artifact_loaded = False
+    monkeypatch.setattr(trading_pipeline, "validate_live_startup", lambda config: None)
+    monkeypatch.setattr(
+        trading_pipeline,
+        "check_api_credentials",
+        lambda config: (True, None),
+    )
+
+    with pytest.raises(RuntimeError, match="no approved production model"):
+        pipeline._validate_startup()
+
+
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_live_account_bootstrap_and_snapshot_application(tmp_path):

@@ -92,7 +92,8 @@ class ShadowLaneRunner:
             ids.extend(
                 model_id
                 for model_id, meta in models.items()
-                if meta.get("status") == "EVALUATING" and model_id not in ids
+                if meta.get("status") in {"CANDIDATE", "EVALUATING"}
+                and model_id not in ids
             )
         return ids
 

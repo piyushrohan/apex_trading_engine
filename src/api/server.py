@@ -15,6 +15,7 @@ from src.api.status_store import get_status_store
 from src.core.config_loader import load_config
 from src.data.cache_manager import DuckDBCacheManager
 from src.execution.live_gate import evaluate_paper_gate
+from src.mlops.experiment_tracker import ExperimentTracker
 from src.mlops.explainability import ExplainabilityEngine
 from src.mlops.promotion_service import PromotionService
 from src.mlops.registry import ModelRegistry
@@ -444,7 +445,42 @@ def market_history(
 def models():
     """Model registry summary for observability and promotion review."""
     registry = ModelRegistry()
-    return registry.registry_data
+    payload = dict(registry.registry_data)
+    payload["production_readiness"] = _production_readiness(registry)
+    return payload
+
+
+@app.get("/models/lifecycle")
+def model_lifecycle(limit: int = 25):
+    """Auditable model lifecycle, training run history, and live blockers."""
+    config = get_config()
+    try:
+        registry = ModelRegistry(
+            registry_dir=config.get("mlops", {}).get("registry_dir", "data_lake/models")
+        )
+    except TypeError:
+        registry = ModelRegistry()
+    tracker = ExperimentTracker.from_config(config)
+    return {
+        "production_readiness": _production_readiness(registry),
+        "active_prod": registry.registry_data.get("active_prod"),
+        "active_shadow": registry.registry_data.get("active_shadow"),
+        "runs": tracker.list_runs(limit=max(1, min(limit, 100))),
+        "registry_events": registry.registry_data.get("events", [])[-100:],
+        "discipline": {
+            "live_requires_prod": True,
+            "prod_requires_status": "PROD",
+            "prod_requires_manifest": True,
+            "prod_requires_artifact": True,
+            "promotion_ladder": [
+                "CANDIDATE",
+                "EVALUATING",
+                "SHADOW",
+                "APPROVED",
+                "PROD",
+            ],
+        },
+    }
 
 
 @app.get("/models/promotion/status")
@@ -489,7 +525,41 @@ def model_detail(model_id: str):
     model = registry.registry_data.get("models", {}).get(model_id)
     if model is None:
         raise HTTPException(status_code=404, detail="model not found")
-    return {"model_id": model_id, **model}
+    return {
+        "model_id": model_id,
+        **model,
+        "production_readiness": _production_readiness(registry, model_id),
+    }
+
+
+@app.get("/models/{model_id}/manifest")
+def model_manifest(model_id: str):
+    """Return the immutable manifest for a registered model."""
+    registry = ModelRegistry()
+    model = registry.registry_data.get("models", {}).get(model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="model not found")
+    manifest_path = model.get("manifest_path")
+    if not manifest_path or not Path(manifest_path).exists():
+        raise HTTPException(status_code=404, detail="manifest not found")
+    return json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+
+
+def _production_readiness(
+    registry: ModelRegistry, model_id: Optional[str] = None
+) -> Dict[str, Any]:
+    readiness_fn = getattr(registry, "production_readiness", None)
+    if readiness_fn:
+        return readiness_fn(model_id)
+    selected = model_id or registry.registry_data.get("active_prod")
+    return {
+        "model_id": selected,
+        "ready": False,
+        "status": None,
+        "manifest_exists": False,
+        "artifact_exists": False,
+        "blockers": ["production_readiness_unavailable"],
+    }
 
 
 @app.get("/logs/runtime")

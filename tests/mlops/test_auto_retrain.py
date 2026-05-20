@@ -102,5 +102,5 @@ def test_auto_retrain_keeps_failed_candidate_out_of_shadow(mock_config, monkeypa
 
     assert pipeline.registry.registered
     assert pipeline.registry.shadow_promotions == []
-    assert pipeline.registry.status_updates[0][1] == "REJECTED"
+    assert pipeline.registry.status_updates[-1][1] == "REJECTED"
     assert pipeline.cache.closed is True

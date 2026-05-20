@@ -297,7 +297,7 @@ python -m src.reports.hedge_report --days 7 --config configs/base.yaml
 
 ### 8. Run MLOps Retraining
 
-The retraining path reads cached OHLCV from DuckDB. Bootstrap data first through ingestion/paper runs, then execute:
+The retraining path reads cached OHLCV from DuckDB, writes an experiment run ledger, trains a candidate, runs OOS and stress gates, writes an immutable manifest, and promotes only safe candidates to the MLOps shadow lane. Bootstrap data first through ingestion/paper runs, then execute:
 
 ```bash
 python -m src.mlops.auto_retrain
@@ -307,6 +307,22 @@ Candidate output is written under the configured model registry directory, usual
 
 ```text
 data_lake/models/
+```
+
+Experiment history is appended to:
+
+```text
+data_lake/mlops/experiments.jsonl
+```
+
+Live mode is blocked unless `active_prod` is a `PROD` registry model with a saved artifact, manifest, git hash, and data snapshot id. See [Model Governance And Retraining Discipline](docs/MODEL_GOVERNANCE.md) for the full train -> validate -> backtest -> stress -> shadow -> approve -> prod workflow.
+
+Useful model-governance endpoints:
+
+```bash
+curl -s http://127.0.0.1:8080/models
+curl -s http://127.0.0.1:8080/models/lifecycle
+curl -s http://127.0.0.1:8080/models/promotion/status
 ```
 
 ### 9. Run Observability Stack
