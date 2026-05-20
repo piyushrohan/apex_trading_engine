@@ -3,9 +3,11 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.status_store import get_status_store
 from src.core.config_loader import load_config
@@ -19,6 +21,18 @@ app = FastAPI(
     title="APEX Trading Engine API",
     description="Read-only status and explainability for paper/live operator modes.",
     version="1.0.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=["*"],
 )
 
 _config: Optional[Dict[str, Any]] = None
@@ -57,6 +71,9 @@ def explain_latest():
     store = get_status_store()
     if store.last_explanation:
         return store.last_explanation
+    persisted = store.snapshot().get("last_explanation")
+    if persisted:
+        return persisted
 
     config = get_config()
     engine = ExplainabilityEngine(config)
@@ -70,7 +87,8 @@ def explain_latest():
 def portfolio(book_id: str = "primary"):
     """Primary book positions and equity (runtime store + optional DB snapshots)."""
     store = get_status_store()
-    runtime = store.snapshot().get("portfolio", {})
+    snap = store.snapshot()
+    runtime = snap.get("portfolio", {})
 
     config = get_config()
     db_path = (
@@ -78,26 +96,33 @@ def portfolio(book_id: str = "primary"):
         .get("storage", {})
         .get("db_path", "data_lake/apex_market_data.duckdb")
     )
-    cache = DuckDBCacheManager(db_path=db_path)
-    try:
-        equity_df = cache.load_paper_equity_snapshots(book_id)
-    finally:
-        cache.close()
+    equity_df = None
+    if Path(db_path).exists():
+        cache = None
+        try:
+            cache = DuckDBCacheManager(db_path=db_path, read_only=True)
+            equity_df = cache.load_paper_equity_snapshots(book_id)
+        except Exception as exc:
+            logger.debug("Paper equity DB read unavailable: %s", exc)
+            equity_df = None
+        finally:
+            if cache is not None:
+                cache.close()
 
     latest_equity = None
     snapshot_count = 0
-    if not equity_df.empty:
+    if equity_df is not None and not equity_df.empty:
         snapshot_count = len(equity_df)
         latest_equity = float(equity_df["equity"].iloc[-1])
 
     return {
         "book_id": book_id,
-        "symbol": store.symbol,
-        "operator_mode": store.operator_mode,
+        "symbol": snap.get("symbol"),
+        "operator_mode": snap.get("operator_mode"),
         "runtime": runtime,
         "paper_snapshots": snapshot_count,
         "latest_equity_from_db": latest_equity,
-        "updated_at": store.updated_at,
+        "updated_at": snap.get("updated_at"),
     }
 
 
@@ -131,7 +156,6 @@ async def ws_status(websocket: WebSocket):
     try:
         while True:
             payload = store.snapshot()
-            payload["last_explanation"] = store.last_explanation
             await websocket.send_json(payload)
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:

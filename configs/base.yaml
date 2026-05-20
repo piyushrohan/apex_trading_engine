@@ -110,13 +110,13 @@ observability:
     port: 9108
 
 shadow:
-  enabled: false
+  enabled: true
   auto_register: true
   max_parallel_candidates: 2
   shared_features: true
 
 hedge:
-  enabled: false
+  enabled: true
   selection: rule_based
   min_score: 0.5
   max_hedge_ratio: 0.35

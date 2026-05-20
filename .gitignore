@@ -11,6 +11,10 @@ data_lake/raw_ticks/*
 data_lake/ohlcv/*
 data_lake/features/*
 data_lake/orderflow/*
+data_lake/runtime_status.json
+data_lake/runtime_status.tmp
+data_lake/trade_journal.jsonl
+data_lake/hedge_bandit/
 
 # Keep data lake structure intact in git
 !data_lake/raw_ticks/.gitkeep
