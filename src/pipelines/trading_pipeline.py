@@ -20,6 +20,7 @@ from src.execution.portfolio import PortfolioService
 from src.execution.position_sync import AccountSynchronizer
 from src.execution.risk_engine import RiskEngine
 from src.mlops.explainability import ExplainabilityEngine
+from src.mlops.performance_calibration import calibration_from_journal
 from src.mlops.registry import ModelRegistry
 from src.mlops.shadow_lane import ShadowLaneRunner
 from src.models.meta_controller import MetaController
@@ -81,6 +82,7 @@ class TradingPipeline:
 
         self._running = False
         self._last_approved_fraction = 0.0
+        self._last_sizing_calibration: Optional[Dict[str, Any]] = None
         self._last_control_command_id: Optional[str] = None
         self._status_store = get_status_store()
         self._status_store.update(
@@ -435,7 +437,7 @@ class TradingPipeline:
                 approved_fraction = 0.0
                 if action != 1:
                     approved_fraction = self._compute_approved_fraction(
-                        action, conviction, current_bbo
+                        action, conviction, current_bbo, current_regime
                     )
 
                 hedge_ctx = HedgeContext(
@@ -547,6 +549,7 @@ class TradingPipeline:
             kill_switch_active=self.risk_engine.is_kill_switch_active,
             model_id=book.model_id,
             last_explanation=last_explanation,
+            sizing_calibration=getattr(self, "_last_sizing_calibration", None),
             portfolio={
                 "book_id": book.book_id,
                 "role": book.role,
@@ -579,6 +582,8 @@ class TradingPipeline:
         }
         explanation["model_id"] = self.primary_book.model_id
         explanation["hedge"] = hedge_payload
+        if getattr(self, "_last_sizing_calibration", None):
+            explanation["sizing_calibration"] = self._last_sizing_calibration
         return explanation
 
     def _append_hedge_bandit_decision(
@@ -623,15 +628,31 @@ class TradingPipeline:
             f.write(json.dumps(row) + "\n")
 
     def _compute_approved_fraction(
-        self, action: int, conviction: float, current_bbo: float
+        self,
+        action: int,
+        conviction: float,
+        current_bbo: float,
+        regime: Optional[str] = None,
     ) -> float:
         side = "BUY" if action == 2 else "SELL"
-        win_rate, win_loss_ratio = 0.55, 1.2
+        calibration_cfg = self.config.get("mlops", {}).get("calibration", {})
+        calibration = calibration_from_journal(
+            self._trade_journal_path(),
+            mode=self.operator_mode,
+            book_id=self.primary_book.book_id,
+            regime=regime,
+            min_samples=int(calibration_cfg.get("min_samples", 20)),
+            default_win_rate=float(calibration_cfg.get("default_win_rate", 0.55)),
+            default_win_loss_ratio=float(
+                calibration_cfg.get("default_win_loss_ratio", 1.2)
+            ),
+        )
+        self._last_sizing_calibration = calibration.as_dict()
         exposure = self.portfolio.current_exposure_fraction(
             self.primary_book.book_id, current_bbo
         )
         kelly_fraction = self.risk_engine.calculate_kelly_size(
-            win_rate, win_loss_ratio, conviction
+            calibration.win_rate, calibration.win_loss_ratio, conviction
         )
         return self.risk_engine.approve_order(
             side,
@@ -643,6 +664,15 @@ class TradingPipeline:
             mark_price=current_bbo,
             is_hedge_leg=False,
         )
+
+    def _trade_journal_path(self) -> str:
+        configured = self.config.get("explainability", {}).get(
+            "journal_path", "data_lake/trade_journal.jsonl"
+        )
+        engine_path = getattr(self.explainability, "trade_journal_path", None)
+        if isinstance(engine_path, (str, os.PathLike)):
+            return str(engine_path)
+        return str(configured)
 
     async def _execute_signal(
         self,

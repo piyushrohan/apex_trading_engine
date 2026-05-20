@@ -77,6 +77,7 @@ def test_auto_retrain_registers_and_promotes_safe_candidate(mock_config, monkeyp
     assert pipeline.registry.registered[0][0] == "gbm_ethusdc_vabcdef12"
     assert pipeline.registry.shadow_promotions == ["gbm_ethusdc_vabcdef12"]
     assert pipeline.registry.metrics_updates[0][0] == "gbm_ethusdc_vabcdef12"
+    assert "walk_forward" in pipeline.registry.metrics_updates[0][1]
     assert pipeline.cache.closed is True
     assert result["status"] == "completed"
 
@@ -104,3 +105,49 @@ def test_auto_retrain_keeps_failed_candidate_out_of_shadow(mock_config, monkeypa
     assert pipeline.registry.shadow_promotions == []
     assert pipeline.registry.status_updates[-1][1] == "REJECTED"
     assert pipeline.cache.closed is True
+
+
+@pytest.mark.mlops
+def test_required_walk_forward_gate_blocks_shadow_promotion(mock_config, monkeypatch):
+    """Verify required walk-forward evidence can block an otherwise safe model."""
+
+    class MixedEvaluator:
+        def __init__(self, config):
+            self.config = config
+            self.calls = 0
+
+        def evaluate_oos(self, pnl, trades):
+            self.calls += 1
+            passed = self.calls == 1
+            return {"passed_safety": passed, "sharpe": 2.0 if passed else 0.1}
+
+        def evaluate_stress(self, pnl, trades):
+            return {"stress_passed": True}
+
+    config = {
+        **mock_config,
+        "mlops": {
+            "candidate_model_type": "GBM",
+            "min_training_rows": 30,
+            "walk_forward": {
+                "enabled": True,
+                "required": True,
+                "folds": 2,
+                "min_test_rows": 5,
+                "min_pass_rate": 1.0,
+            },
+        },
+    }
+    monkeypatch.setattr(auto_retrain, "ModelRegistry", FakeRegistry)
+    monkeypatch.setattr(auto_retrain, "DuckDBCacheManager", FakeCache)
+    monkeypatch.setattr(auto_retrain, "ModelEvaluator", MixedEvaluator)
+    monkeypatch.setattr(auto_retrain.uuid, "uuid4", lambda: FakeUUID())
+
+    pipeline = AutoRetrainPipeline(config)
+    result = pipeline.execute_nightly_retrain()
+
+    walk_forward = result["metrics"]["walk_forward"]
+    assert walk_forward["required"] is True
+    assert walk_forward["passed"] is False
+    assert pipeline.registry.shadow_promotions == []
+    assert pipeline.registry.status_updates[-1][1] == "REJECTED"

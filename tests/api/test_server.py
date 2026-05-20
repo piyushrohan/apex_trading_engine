@@ -31,6 +31,7 @@ def test_status_endpoint(client):
         symbol="ETHUSDC",
         regime="MEAN_REVERSION",
         kill_switch_active=False,
+        sizing_calibration={"win_rate": 0.55, "source": "default_missing_journal"},
         portfolio={"long_qty": 0.1, "short_qty": 0.0, "equity": 1000.0},
     )
     resp = client.get("/status")
@@ -38,6 +39,7 @@ def test_status_endpoint(client):
     body = resp.json()
     assert body["operator_mode"] == "paper"
     assert body["regime"] == "MEAN_REVERSION"
+    assert body["sizing_calibration"]["win_rate"] == 0.55
 
 
 @pytest.mark.unit

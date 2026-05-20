@@ -24,6 +24,7 @@ class StatusStore:
     kill_switch_active: bool = False
     model_id: Optional[str] = None
     last_explanation: Optional[Dict[str, Any]] = None
+    sizing_calibration: Optional[Dict[str, Any]] = None
     portfolio: Dict[str, Any] = field(default_factory=dict)
     ingestion_enabled: bool = True
     hedge_enabled: bool = False
@@ -43,6 +44,7 @@ class StatusStore:
             "updated_at": self.updated_at,
             "portfolio": dict(self.portfolio),
             "last_explanation": self.last_explanation,
+            "sizing_calibration": self.sizing_calibration,
         }
 
     def _persist(self, payload: Dict[str, Any]) -> None:
@@ -72,6 +74,7 @@ class StatusStore:
         kill_switch_active: Optional[bool] = None,
         model_id: Optional[str] = None,
         last_explanation: Optional[Dict[str, Any]] = None,
+        sizing_calibration: Optional[Dict[str, Any]] = None,
         portfolio: Optional[Dict[str, Any]] = None,
         ingestion_enabled: Optional[bool] = None,
         hedge_enabled: Optional[bool] = None,
@@ -91,6 +94,8 @@ class StatusStore:
                 self.model_id = model_id
             if last_explanation is not None:
                 self.last_explanation = last_explanation
+            if sizing_calibration is not None:
+                self.sizing_calibration = dict(sizing_calibration)
             if portfolio is not None:
                 self.portfolio = dict(portfolio)
             if ingestion_enabled is not None:

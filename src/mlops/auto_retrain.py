@@ -180,8 +180,10 @@ class AutoRetrainPipeline:
                 )
             else:
                 stress_metrics = {"stress_passed": metrics.get("passed_safety", False)}
+            walk_forward_metrics = self._walk_forward_validate(dataset, model_type)
             metrics["training"] = train_metrics
             metrics["stress"] = stress_metrics
+            metrics["walk_forward"] = walk_forward_metrics
             self.registry.update_model_metrics(new_model_id, metrics)
             self.tracker.log_step(
                 run_id,
@@ -197,6 +199,13 @@ class AutoRetrainPipeline:
                 metrics=stress_metrics,
                 metadata={"model_id": new_model_id},
             )
+            self.tracker.log_step(
+                run_id,
+                "walk_forward",
+                "PASSED" if walk_forward_metrics.get("passed") else "FAILED",
+                metrics=walk_forward_metrics,
+                metadata={"model_id": new_model_id},
+            )
             if hasattr(self.registry, "write_model_manifest"):
                 self.registry.write_model_manifest(
                     new_model_id,
@@ -210,6 +219,10 @@ class AutoRetrainPipeline:
             passed_all = bool(
                 metrics.get("passed_safety", False)
                 and stress_metrics.get("stress_passed", False)
+                and (
+                    not walk_forward_metrics.get("required", False)
+                    or walk_forward_metrics.get("passed", False)
+                )
             )
             if passed_all:
                 logger.info(
@@ -229,7 +242,7 @@ class AutoRetrainPipeline:
                         new_model_id,
                         "REJECTED",
                         actor="auto_retrain",
-                        reason="offline_or_stress_gate_failed",
+                        reason="offline_stress_or_walk_forward_gate_failed",
                     )
                 except TypeError:
                     self.registry.set_model_status(new_model_id, "REJECTED")
@@ -321,6 +334,94 @@ class AutoRetrainPipeline:
     def _to_backtest_frame(self, dataset: pd.DataFrame) -> pd.DataFrame:
         frame = dataset[["timestamp", "close", "regime_str", *self._feature_columns()]]
         return frame.set_index("timestamp")
+
+    def _walk_forward_validate(
+        self, dataset: pd.DataFrame, model_type: str
+    ) -> Dict[str, Any]:
+        """Run expanding-window folds to expose temporal stability."""
+        cfg = self.config.get("mlops", {}).get("walk_forward", {})
+        if not cfg.get("enabled", True):
+            return {
+                "enabled": False,
+                "required": bool(cfg.get("required", False)),
+                "passed": True,
+                "reason": "disabled",
+                "folds": [],
+            }
+
+        total_rows = len(dataset)
+        requested_folds = max(int(cfg.get("folds", 3)), 1)
+        min_train_fraction = float(cfg.get("min_train_fraction", 0.45))
+        min_train_rows = max(int(total_rows * min_train_fraction), 10)
+        min_test_rows = max(int(cfg.get("min_test_rows", 10)), 1)
+        remaining_rows = total_rows - min_train_rows
+        if remaining_rows < min_test_rows:
+            return {
+                "enabled": True,
+                "required": bool(cfg.get("required", False)),
+                "passed": True,
+                "reason": "insufficient_fold_data",
+                "total_rows": int(total_rows),
+                "folds": [],
+            }
+
+        fold_size = max(remaining_rows // requested_folds, min_test_rows)
+        fold_results = []
+        for fold_idx in range(requested_folds):
+            train_end = min_train_rows + fold_idx * fold_size
+            test_end = min(train_end + fold_size, total_rows)
+            if test_end - train_end < min_test_rows:
+                continue
+
+            train_df = dataset.iloc[:train_end]
+            test_df = dataset.iloc[train_end:test_end]
+            agent = self._build_agent(model_type)
+            train_metrics = agent.train(
+                train_df[self._feature_columns()].to_numpy(),
+                train_df["label"].to_numpy(),
+            )
+            backtest = BacktestEngine(self.config)
+            backtest.meta_controller = CandidateController(agent)
+            pnl_series, trade_history = backtest.run(self._to_backtest_frame(test_df))
+            fold_metrics = self.evaluator.evaluate_oos(pnl_series, trade_history)
+            fold_results.append(
+                {
+                    "fold": len(fold_results) + 1,
+                    "train_rows": int(len(train_df)),
+                    "test_rows": int(len(test_df)),
+                    "train_accuracy": train_metrics.get("train_accuracy"),
+                    "passed_safety": bool(fold_metrics.get("passed_safety", False)),
+                    "sharpe": float(fold_metrics.get("sharpe", 0.0)),
+                    "max_drawdown": float(fold_metrics.get("max_drawdown", 1.0)),
+                    "total_trades": int(fold_metrics.get("total_trades", 0)),
+                }
+            )
+
+        if not fold_results:
+            return {
+                "enabled": True,
+                "required": bool(cfg.get("required", False)),
+                "passed": True,
+                "reason": "no_valid_folds",
+                "total_rows": int(total_rows),
+                "folds": [],
+            }
+
+        pass_count = sum(1 for fold in fold_results if fold["passed_safety"])
+        pass_rate = pass_count / len(fold_results)
+        min_pass_rate = float(cfg.get("min_pass_rate", 0.66))
+        return {
+            "enabled": True,
+            "required": bool(cfg.get("required", False)),
+            "passed": pass_rate >= min_pass_rate,
+            "pass_rate": float(pass_rate),
+            "min_pass_rate": min_pass_rate,
+            "fold_count": len(fold_results),
+            "avg_sharpe": float(np.mean([fold["sharpe"] for fold in fold_results])),
+            "worst_drawdown": float(max(fold["max_drawdown"] for fold in fold_results)),
+            "total_trades": int(sum(fold["total_trades"] for fold in fold_results)),
+            "folds": fold_results,
+        }
 
     @staticmethod
     def _data_snapshot_id(df: pd.DataFrame) -> str:
