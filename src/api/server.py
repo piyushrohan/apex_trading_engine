@@ -214,10 +214,8 @@ def record_control_command(command: str, payload: Optional[Dict[str, Any]] = Non
         state["flatten_requested_at"] = now
     elif command == "set-mode":
         mode = body.get("mode")
-        if mode not in ("paper", "live", "shadow"):
-            raise HTTPException(
-                status_code=400, detail="mode must be paper/live/shadow"
-            )
+        if mode not in ("paper", "live"):
+            raise HTTPException(status_code=400, detail="mode must be paper/live")
         state["mode_request"] = mode
     elif command == "set-risk-profile":
         profile = body.get("profile")

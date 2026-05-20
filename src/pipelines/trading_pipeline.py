@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.api.status_store import get_status_store
+from src.core.config_loader import apply_risk_profile
 from src.core.security import SecurityManager
 from src.data.binance_rest import BinanceRESTClient
 from src.data.ingestion_service import DataIngestionService
@@ -78,6 +79,7 @@ class TradingPipeline:
 
         self._running = False
         self._last_approved_fraction = 0.0
+        self._last_control_command_id: Optional[str] = None
         self._status_store = get_status_store()
         self._status_store.update(
             operator_mode=self.operator_mode,
@@ -249,6 +251,87 @@ class TradingPipeline:
         mark = self.ingestion.get_last_mark_price(symbol) or 0.0
         self._apply_account_snapshot(symbol, position_data, mark)
 
+    @staticmethod
+    def _operator_control_state_path() -> Path:
+        return Path(
+            os.getenv("APEX_CONTROL_STATE_PATH", "data_lake/operator_controls.json")
+        )
+
+    def _load_operator_controls(self) -> Dict[str, Any]:
+        path = self._operator_control_state_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Operator control state unreadable: %s", exc)
+            return {"error": "control state unreadable"}
+
+    @staticmethod
+    def _control_command_id(controls: Dict[str, Any]) -> Optional[str]:
+        command = controls.get("last_command") or {}
+        name = command.get("command")
+        timestamp = command.get("timestamp")
+        if not name or not timestamp:
+            return None
+        return f"{timestamp}:{name}"
+
+    def _apply_operator_risk_profile(self, profile: Optional[str]) -> None:
+        if not profile:
+            return
+        try:
+            current_equity = getattr(
+                self.risk_engine, "current_equity", self.primary_book.equity
+            )
+            high_water_mark = getattr(
+                self.risk_engine, "high_water_mark", current_equity
+            )
+            kill_switch = getattr(self.risk_engine, "is_kill_switch_active", False)
+            self.config = apply_risk_profile(self.config, profile)
+            refreshed = RiskEngine(self.config)
+            refreshed.current_equity = current_equity
+            refreshed.high_water_mark = high_water_mark
+            refreshed.is_kill_switch_active = kill_switch
+            self.risk_engine = refreshed
+            logger.warning("Operator risk profile applied: %s", profile)
+        except Exception as exc:
+            logger.error("Rejected operator risk profile %s: %s", profile, exc)
+
+    async def _apply_operator_controls(self, mark_price: Optional[float]) -> bool:
+        controls = self._load_operator_controls()
+        if not controls or "error" in controls:
+            return False
+
+        command_id = self._control_command_id(controls)
+        command = controls.get("last_command") or {}
+        if command_id and command_id != self._last_control_command_id:
+            self._last_control_command_id = command_id
+            name = command.get("command")
+            payload = command.get("payload") or {}
+            if name == "kill-switch":
+                self.risk_engine.is_kill_switch_active = True
+            elif name == "clear-kill-switch":
+                self.risk_engine.is_kill_switch_active = False
+            elif name == "flatten":
+                if mark_price and mark_price > 0:
+                    await self._handle_kill_switch(mark_price)
+                else:
+                    logger.warning("Flatten request deferred: no mark price available")
+            elif name == "set-risk-profile":
+                self._apply_operator_risk_profile(payload.get("profile"))
+            elif name == "set-mode" and payload.get("mode") != self.operator_mode:
+                logger.warning(
+                    "Operator mode change to %s requires a controlled restart",
+                    payload.get("mode"),
+                )
+
+        if controls.get("kill_switch_requested"):
+            self.risk_engine.is_kill_switch_active = True
+        if controls.get("paused"):
+            logger.warning("Operator pause active - skipping trading tick.")
+            return True
+        return False
+
     async def _trading_loop(self):
         logger.info(f"Trading loop active for {self.symbol} ({self.operator_mode})")
         loop_interval = self.config.get("data", {}).get("loop_interval_sec", 3.0)
@@ -271,6 +354,12 @@ class TradingPipeline:
                     self.ingestion.get_last_mark_price(self.symbol)
                     or snapshot["mark_price"]
                 )
+                if await self._apply_operator_controls(current_bbo):
+                    self._publish_status(
+                        regime=current_regime,
+                        mark_price=current_bbo,
+                    )
+                    continue
 
                 (
                     action,

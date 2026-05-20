@@ -395,6 +395,11 @@ def test_control_validation_and_all_command_transitions(client, tmp_path, monkey
         ).status_code
         == 400
     )
+    shadow_mode = client.post(
+        "/control/set-mode", json={"confirm": True, "mode": "shadow"}
+    )
+    assert shadow_mode.status_code == 400
+    assert shadow_mode.json()["detail"] == "mode must be paper/live"
     assert (
         client.post("/control/set-risk-profile", json={"confirm": True}).status_code
         == 400

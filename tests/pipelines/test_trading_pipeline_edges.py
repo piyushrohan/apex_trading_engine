@@ -115,6 +115,7 @@ def build_shell_pipeline(tmp_path, *, mode="paper", position_mode="hedge"):
     pipeline._status_store = FakeStatus()
     pipeline._running = False
     pipeline._last_approved_fraction = 0.0
+    pipeline._last_control_command_id = None
     return pipeline
 
 
@@ -293,6 +294,94 @@ def test_publish_status_and_bandit_decision_logging(tmp_path, monkeypatch):
     assert metrics.pnl[-1][1:3] == ("primary", "primary")
     assert row["hedge"]["selected"] == "protective_hedge"
     assert row["bandit_context"]["primary_size_fraction"] == 0.2
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_operator_controls_pause_kill_clear_and_flatten(tmp_path, monkeypatch):
+    control_path = tmp_path / "operator_controls.json"
+    monkeypatch.setenv("APEX_CONTROL_STATE_PATH", str(control_path))
+    pipeline = build_shell_pipeline(tmp_path, position_mode="hedge")
+
+    def write_control(command, state=None, payload=None):
+        body = {
+            "paused": False,
+            "kill_switch_requested": False,
+            "flatten_requested_at": None,
+            "last_command": {
+                "timestamp": f"2026-05-20T00:00:0{write_control.counter}+00:00",
+                "command": command,
+                "reason": "test",
+                "payload": payload or {},
+            },
+        }
+        write_control.counter += 1
+        body.update(state or {})
+        control_path.write_text(json.dumps(body), encoding="utf-8")
+
+    write_control.counter = 1
+
+    write_control("pause", {"paused": True})
+    assert await pipeline._apply_operator_controls(3500.0) is True
+
+    write_control("kill-switch", {"kill_switch_requested": True})
+    assert await pipeline._apply_operator_controls(3500.0) is False
+    assert pipeline.risk_engine.is_kill_switch_active is True
+
+    write_control("clear-kill-switch")
+    assert await pipeline._apply_operator_controls(3500.0) is False
+    assert pipeline.risk_engine.is_kill_switch_active is False
+
+    paper = PaperExecutionAdapter(book_id="primary")
+    pipeline.execution_adapter = paper
+    pipeline.primary_book.apply_fill("BUY", 0.2, 3500.0, "LONG")
+    write_control("flatten", {"flatten_requested_at": "2026-05-20T00:00:04+00:00"})
+
+    assert await pipeline._apply_operator_controls(3490.0) is False
+    assert pipeline.primary_book.long_qty == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_operator_control_applies_risk_profile_and_logs_mode_request(
+    tmp_path, monkeypatch
+):
+    control_path = tmp_path / "operator_controls.json"
+    monkeypatch.setenv("APEX_CONTROL_STATE_PATH", str(control_path))
+    pipeline = build_shell_pipeline(tmp_path, mode="paper")
+    pipeline.risk_engine = trading_pipeline.RiskEngine(pipeline.config)
+
+    control_path.write_text(
+        json.dumps(
+            {
+                "last_command": {
+                    "timestamp": "2026-05-20T00:00:00+00:00",
+                    "command": "set-risk-profile",
+                    "payload": {"profile": "aggressive"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    await pipeline._apply_operator_controls(3500.0)
+
+    assert pipeline.config["risk"]["profile"] == "aggressive"
+    assert pipeline.risk_engine.max_leverage == 5.0
+
+    control_path.write_text(
+        json.dumps(
+            {
+                "last_command": {
+                    "timestamp": "2026-05-20T00:00:01+00:00",
+                    "command": "set-mode",
+                    "payload": {"mode": "live"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert await pipeline._apply_operator_controls(3500.0) is False
 
 
 @pytest.mark.asyncio
