@@ -79,6 +79,9 @@ def test_auto_retrain_registers_and_promotes_safe_candidate(mock_config, monkeyp
     assert pipeline.registry.shadow_promotions == ["gbm_ethusdc_vabcdef12"]
     assert pipeline.registry.metrics_updates[0][0] == "gbm_ethusdc_vabcdef12"
     assert "walk_forward" in pipeline.registry.metrics_updates[0][1]
+    assert "label_quality" in pipeline.registry.metrics_updates[0][1]
+    assert "classifier_quality" in pipeline.registry.metrics_updates[0][1]
+    assert pipeline.registry.metrics_updates[0][1]["quality_gate"]["passed"] is True
     assert pipeline.cache.closed is True
     assert result["status"] == "completed"
 
@@ -105,6 +108,26 @@ def test_auto_retrain_keeps_failed_candidate_out_of_shadow(mock_config, monkeypa
     assert pipeline.registry.registered
     assert pipeline.registry.shadow_promotions == []
     assert pipeline.registry.status_updates[-1][1] == "REJECTED"
+    assert pipeline.cache.closed is True
+
+
+@pytest.mark.mlops
+def test_auto_retrain_skips_when_supervised_rows_are_too_sparse(
+    mock_config, monkeypatch
+):
+    config = {
+        **mock_config,
+        "mlops": {"min_training_rows": 10, "min_supervised_rows": 500},
+    }
+    monkeypatch.setattr(auto_retrain, "ModelRegistry", FakeRegistry)
+    monkeypatch.setattr(auto_retrain, "DuckDBCacheManager", FakeCache)
+
+    pipeline = AutoRetrainPipeline(config)
+    result = pipeline.execute_nightly_retrain()
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "insufficient_supervised_data"
+    assert pipeline.registry.registered == []
     assert pipeline.cache.closed is True
 
 
@@ -176,14 +199,94 @@ def test_supervised_dataset_keeps_future_returns_out_of_features(mock_config):
     dataset = pipeline._build_supervised_dataset(raw)
     close = raw["close"].astype(float)
     returns = close.pct_change().fillna(0.0)
-    future_returns = close.shift(-1).sub(close).div(close).fillna(0.0)
+    future_returns = close.shift(-1).sub(close).div(close).dropna()
+    expected_rows = len(raw) - 1
 
-    assert dataset["feature_3"].tolist() == (returns > 0.005).astype(float).tolist()
-    assert dataset["feature_4"].tolist() == (returns < -0.005).astype(float).tolist()
+    assert len(dataset) == expected_rows
+    assert (
+        dataset["feature_3"].tolist()
+        == (returns.iloc[:expected_rows] > 0.005).astype(float).tolist()
+    )
+    assert (
+        dataset["feature_4"].tolist()
+        == (returns.iloc[:expected_rows] < -0.005).astype(float).tolist()
+    )
     assert np.allclose(
         dataset["feature_6"],
-        returns.rolling(5, min_periods=1).mean(),
+        returns.rolling(5, min_periods=1).mean().iloc[:expected_rows],
     )
     assert (
         dataset["feature_3"].tolist() != (future_returns > 0.005).astype(float).tolist()
     )
+
+
+@pytest.mark.mlops
+def test_supervised_dataset_uses_horizon_and_fee_adjusted_labels(mock_config):
+    closes = [100.0, 100.02, 100.04, 100.20, 100.10, 99.90]
+    raw = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-05-20", periods=len(closes), freq="3min"),
+            "symbol": "ETHUSDC",
+            "timeframe": "3m",
+            "open": closes,
+            "high": [price + 1 for price in closes],
+            "low": [price - 1 for price in closes],
+            "close": closes,
+            "volume": [100, 101, 102, 103, 104, 105],
+        }
+    )
+    pipeline = AutoRetrainPipeline.__new__(AutoRetrainPipeline)
+    pipeline.config = {
+        **mock_config,
+        "mlops": {
+            "label_return_threshold": 0.0001,
+            "label_horizon_bars": 2,
+            "label_cost_buffer_bps": 5.0,
+        },
+    }
+
+    dataset = pipeline._build_supervised_dataset(raw)
+
+    assert len(dataset) == len(raw) - 2
+    assert dataset["label_threshold"].iloc[0] == 0.0005
+    assert dataset["label_horizon_bars"].iloc[0] == 2
+    assert set(dataset["label"]).issubset({0, 1, 2})
+
+
+@pytest.mark.mlops
+def test_quality_gate_blocks_short_history_and_unstable_labels(mock_config):
+    pipeline = AutoRetrainPipeline.__new__(AutoRetrainPipeline)
+    pipeline.config = {
+        **mock_config,
+        "mlops": {
+            "quality": {
+                "min_history_days": 30,
+                "min_directional_ratio": 0.20,
+                "max_dominant_label_ratio": 0.70,
+                "max_near_threshold_ratio": 0.10,
+                "near_threshold_band_fraction": 0.50,
+            }
+        },
+    }
+    dataset = pd.DataFrame(
+        {
+            "label": [1, 1, 1, 1, 2],
+            "future_return": [0.00049, 0.00048, 0.00047, 0.00046, 0.001],
+            "label_threshold": [0.0005] * 5,
+            "label_horizon_bars": [3] * 5,
+        }
+    )
+
+    label_quality = pipeline._label_quality_report(dataset)
+    gate = pipeline._quality_gate(
+        data_metadata={"history_days": 7},
+        label_quality=label_quality,
+        classifier_quality={"passed": True, "blockers": []},
+    )
+
+    assert label_quality["passed"] is False
+    assert "dominant_label_too_high" in label_quality["blockers"]
+    assert "labels_too_close_to_threshold" in label_quality["blockers"]
+    assert gate["passed"] is False
+    assert "history_window_too_short" in gate["blockers"]
+    assert "label:dominant_label_too_high" in gate["blockers"]

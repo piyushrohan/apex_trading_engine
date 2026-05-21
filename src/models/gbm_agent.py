@@ -105,19 +105,27 @@ class GBMAgent:
             self.backend = "numpy_centroid"
             return NumpyCentroidClassifier()
 
-    def train(self, features, labels) -> Dict[str, Any]:
+    def train(self, features, labels, sample_weight=None) -> Dict[str, Any]:
         """Fit the GBM classifier on feature rows and integer actions."""
         x_arr = np.asarray(features, dtype=float)
         y_arr = np.asarray(labels, dtype=int)
+        weights = None
+        if sample_weight is not None:
+            weights = np.asarray(sample_weight, dtype=float)
         if x_arr.ndim != 2:
             raise ValueError("GBMAgent.train expects a 2D feature matrix.")
         if len(x_arr) != len(y_arr):
             raise ValueError("Feature and label lengths must match.")
+        if weights is not None and len(weights) != len(y_arr):
+            raise ValueError("Sample weight and label lengths must match.")
         if len(x_arr) == 0:
             raise ValueError("Cannot train GBM on an empty dataset.")
 
         self.model = self._build_model()
-        self.model.fit(x_arr, y_arr)
+        try:
+            self.model.fit(x_arr, y_arr, sample_weight=weights)
+        except TypeError:
+            self.model.fit(x_arr, y_arr)
         self.is_trained = True
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="X does not have valid feature")

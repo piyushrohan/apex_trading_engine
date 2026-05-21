@@ -25,9 +25,13 @@ Tracks delivery against [PRODUCTION_CHECKLIST_AND_ROADMAP.md](./PRODUCTION_CHECK
 |------|--------|-------|
 | Remove future leakage from supervised features | DONE | `future_returns` is now used only for labels; training features are causal/current-bar only |
 | Real LightGBM local training stability | DONE | Added `scikit-learn`, macOS `libomp` setup guidance, and safer LightGBM defaults |
+| Fee-adjusted horizon labels | DONE | Auto-retrain labels now use `label_horizon_bars` plus fee/slippage buffer before assigning SHORT/FLAT/LONG |
+| Label stability diagnostics | DONE | Candidate metrics include directional ratio, dominant label ratio, entropy, and near-threshold sensitivity |
+| Probability calibration diagnostics | DONE | Candidate metrics include OOS accuracy, Brier score, expected calibration error, confidence, and trade-signal coverage |
+| Model quality promotion gate | DONE | Shadow promotion can now be blocked by short history, unstable labels, class imbalance, or weak classifier calibration |
 | Forward paper/shadow evidence before PROD | IN_PROGRESS | New candidates should remain SHADOW until paper/live-forward journal evidence confirms offline metrics |
-| Richer alpha feature research | NOT_STARTED | Add order-flow, spread, funding, cross-asset, and regime-aware features without label leakage |
-| Stricter promotion gates after leakage fix | NOT_STARTED | Recalibrate thresholds after realistic retrain metrics replace inflated leaked metrics |
+| Richer alpha feature research | IN_PROGRESS | Quality milestone hardens labels/calibration; next slice should add order-flow, spread, funding, cross-asset, and regime-aware features |
+| Stricter promotion gates after leakage fix | DONE | Base config now requires longer history and quality evidence before shadow promotion |
 
 ---
 
@@ -93,6 +97,7 @@ Run the trading pipeline in another terminal so `/status` and `/explain/latest` 
 | PPO train/save/load | DONE | `PPOAgent.train()` supervised warm-start plus checkpoint `save()` / `load()` |
 | Registry metric/status updates | DONE | `update_model_metrics()`, `set_model_status()`, `rollback_prod()` |
 | Auto-retrain real data path | DONE | Reads DuckDB OHLCV, builds causal supervised features plus next-bar labels, trains candidate, saves artifact, runs OOS backtest, evaluates safety, promotes to SHADOW or rejects |
+| Model quality upgrade | DONE | `AutoRetrainPipeline` records fee-adjusted label quality, class-balanced GBM weights, OOS probability calibration, and quality-gate blockers |
 | Shadow lane runner | DONE | `ShadowLaneRunner` runs candidate models through shared `PaperExecutionAdapter` with `book.role=shadow` and logs decisions |
 | TradingPipeline shadow integration | DONE | Pipeline invokes shadow lanes when `shadow.enabled` is true under paper or live operator mode |
 | Promotion service | DONE | `src/mlops/promotion_service.py` compares shadow vs primary metrics and promotes, rejects, or rolls back independently of paper→live gate |
@@ -113,6 +118,7 @@ Run the trading pipeline in another terminal so `/status` and `/explain/latest` 
 - [x] Hedge T-C plugins and all-seven strategy score logging are complete
 - [x] Train → shadow → promote → rollback paths are covered by automated MLOps tests
 - [x] Live mode refuses unregistered or incomplete production model evidence
+- [x] Candidate promotion captures label stability and probability calibration evidence
 
 ---
 
@@ -181,7 +187,7 @@ venv/bin/pytest -q
 | Cockpit Ops tab | DONE | Frontend adds `Ops` with guardrail findings, data freshness, live-gate snapshot, and next actions |
 | Exchange rule validation foundation | DONE | Binance REST client validates `exchangeInfo` constraints for USDC margin, `GTX`, price filter, lot size, and min notional |
 | Full order lifecycle analytics | TODO | Add persistent submit/ack/open/partial/cancel/replace/fill/reject telemetry |
-| Feature drift and label stability reports | TODO | Compare live data vs training snapshot and expose label sensitivity |
+| Feature drift and label stability reports | IN_PROGRESS | Retrain now records label stability and classifier calibration; next step is live feature drift against active model snapshots |
 | Separate kill-switch lanes | TODO | Split model, data, execution, account-sync, and manual operator kill switches |
 | Chart overlays and replay mode | TODO | Add candles with decisions/fills, probability history, shadow-vs-primary comparison, and session replay |
 
@@ -199,3 +205,4 @@ venv/bin/pytest -q
 | 2026-05-19 | **Milestones 8–9 complete** — terminal API/frontend, active PROD loading, live prep hardening, partial paper fills, registry manifests, CI workflow wiring, and contextual bandit reward update path |
 | 2026-05-20 | **Model governance hardening** — experiment tracking, strict registry lifecycle, stress gates, readiness API/frontend, and live model evidence guard |
 | 2026-05-21 | **Trader production readiness** — added quant-critic backlog, shadow artifact quarantine, `/ops/readiness`, cockpit Ops tab, and exchange-rule validation foundation |
+| 2026-05-21 | **Model quality upgrade** — added fee-adjusted horizon labels, label stability diagnostics, probability calibration diagnostics, and quality gates for shadow promotion |

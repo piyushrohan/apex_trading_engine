@@ -101,9 +101,24 @@ mlops:
   registry_dir: data_lake/models
   experiment_log_path: data_lake/mlops/experiments.jsonl
   min_training_rows: 120
+  min_supervised_rows: 120
   candidate_model_type: GBM
   label_return_threshold: 0.0005
+  label_horizon_bars: 3
+  label_cost_buffer_bps: 4.0
   feature_version: v1
+  quality:
+    min_history_days: 90
+    min_directional_ratio: 0.12
+    max_dominant_label_ratio: 0.80
+    near_threshold_band_fraction: 0.20
+    max_near_threshold_ratio: 0.45
+    class_balance_weights: true
+    max_sample_weight: 5.0
+    trade_probability_threshold: 0.55
+    min_trade_signal_coverage: 0.05
+    max_expected_calibration_error: 0.35
+    max_brier_score: 0.80
   evaluation:
     min_trades: 50
     min_sharpe: 1.5

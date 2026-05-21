@@ -36,6 +36,9 @@ Every model promotion should preserve:
 - hyperparameters
 - offline metrics
 - stress metrics
+- label quality metrics
+- classifier calibration metrics
+- model quality gate blockers
 - artifact path
 - lifecycle events
 - experiment run id
@@ -73,6 +76,14 @@ curl -s http://127.0.0.1:8080/models/promotion/status
 curl -s http://127.0.0.1:8080/models/<model_id>/manifest
 ```
 
+Inspect candidate quality evidence:
+
+```bash
+jq '.models["<model_id>"].metrics.label_quality' data_lake/models/registry.json
+jq '.models["<model_id>"].metrics.classifier_quality' data_lake/models/registry.json
+jq '.models["<model_id>"].metrics.quality_gate' data_lake/models/registry.json
+```
+
 Run the full local validation:
 
 ```bash
@@ -82,8 +93,14 @@ make ci-local
 ## Promotion Rules
 
 Auto-retrain may promote only to `SHADOW`. Production promotion must pass the
-shadow gate:
+offline, model-quality, and shadow gates:
 
+- enough historical data for the configured quality policy
+- stable enough labels after fee-adjusted horizon labeling
+- acceptable OOS probability calibration and trade-signal coverage
+- OOS backtest safety
+- stress safety
+- walk-forward safety when configured as required
 - enough shadow trades
 - shadow drawdown below threshold
 - material Sharpe improvement over primary/prod
