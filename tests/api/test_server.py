@@ -383,6 +383,87 @@ def test_history_equity_market_logs_audit_and_controls(client, tmp_path, monkeyp
 
 
 @pytest.mark.unit
+def test_ops_readiness_surfaces_trader_live_blockers(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-20T00:00:00+00:00",
+                "decision": "LONG",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeRegistry:
+        registry_data = {
+            "models": {},
+            "active_prod": None,
+            "active_shadow": "shadow-v1",
+        }
+
+        def production_readiness(self, model_id=None):
+            return {
+                "ready": False,
+                "model_id": None,
+                "blockers": ["no_active_prod_model"],
+            }
+
+    server_module._config = None
+    monkeypatch.setattr(server_module, "ModelRegistry", lambda: FakeRegistry())
+    monkeypatch.setattr(
+        server_module,
+        "generate_paper_report",
+        lambda config, book_id="primary", journal_path=None: {
+            "filled_orders": 0,
+            "fill_rate": 0.0,
+            "sharpe": 0.0,
+        },
+    )
+    monkeypatch.setattr(
+        server_module,
+        "evaluate_paper_gate",
+        lambda *args, **kwargs: SimpleNamespace(
+            passed=False,
+            reasons=["paper run is too short"],
+            metrics={"paper_days": 0.1, "total_trades": 0},
+        ),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "explainability": {"journal_path": str(journal)},
+            "data": {"storage": {"db_path": str(tmp_path / "missing.duckdb")}},
+            "paper": {},
+            "live": {},
+            "risk": {"min_live_conviction": 0.6},
+        },
+    )
+    store = get_status_store()
+    store.update(
+        operator_mode="paper",
+        symbol="ETHUSDC",
+        mark_price=2120.0,
+        kill_switch_active=False,
+        last_explanation={"conviction_score": 0.42},
+    )
+
+    body = client.get("/ops/readiness").json()
+    codes = {check["code"] for check in body["checks"]}
+
+    assert body["summary"]["live_ready"] is False
+    assert "prod_model_not_ready" in codes
+    assert "paper_to_live_gate_blocked" in codes
+    assert "fill_evidence_missing" in codes
+    assert "model_conviction_low" in codes
+    assert body["summary"]["active_shadow"] == "shadow-v1"
+
+
+@pytest.mark.unit
 def test_control_validation_and_all_command_transitions(client, tmp_path, monkeypatch):
     import src.api.server as server_module
 
@@ -564,6 +645,9 @@ def test_history_model_and_dataframe_empty_paths(client, tmp_path, monkeypatch):
     assert client.get("/history/equity").json()["items"] == []
     assert client.get("/history/market").json()["ohlcv"] == []
     assert server_module._records_from_df(pd.DataFrame()) == []
+    assert server_module._records_from_df(
+        pd.DataFrame([{"timestamp": pd.NaT, "close": float("nan")}])
+    ) == [{"timestamp": None, "close": None}]
 
     class EmptyRegistry:
         registry_data = {"models": {}, "active_shadow": None}

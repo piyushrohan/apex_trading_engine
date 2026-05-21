@@ -35,3 +35,12 @@ test("models cockpit exposes governance readiness and lifecycle history", () => 
   assert.match(app, /Experiment Runs/);
   assert.match(app, /CANDIDATE", "EVALUATING", "SHADOW", "APPROVED", "PROD"/);
 });
+
+test("ops cockpit exposes trader production readiness", () => {
+  assert.match(app, /"Ops"/);
+  assert.match(app, /\/ops\/readiness/);
+  assert.match(app, /Trader Readiness/);
+  assert.match(app, /Guardrail Findings/);
+  assert.match(app, /Data Freshness/);
+  assert.match(app, /PROD blocked/);
+});

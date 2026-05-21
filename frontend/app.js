@@ -10,6 +10,7 @@
     "Models",
     "History",
     "Risk",
+    "Ops",
     "Logs",
   ];
   const ACTION_LABELS = ["SHORT", "FLAT", "LONG"];
@@ -105,6 +106,7 @@
       models: { models: {} },
       lifecycle: { runs: [], production_readiness: { blockers: [] } },
       promotion: null,
+      readiness: null,
       logs: { files: [] },
       audit: { items: [], total: 0 },
       controls: null,
@@ -137,6 +139,7 @@
           models,
           lifecycle,
           promotion,
+          readiness,
           logs,
           audit,
           controls,
@@ -159,6 +162,7 @@
             production_readiness: { blockers: [] },
           }),
           getJson(`${apiBase}/models/promotion/status`, null),
+          getJson(`${apiBase}/ops/readiness`, null),
           getJson(`${apiBase}/logs/runtime?limit=80`, { files: [] }),
           getJson(`${apiBase}/audit?limit=80`, { items: [], total: 0 }),
           getJson(`${apiBase}/control/state`, null),
@@ -177,6 +181,7 @@
           models,
           lifecycle,
           promotion,
+          readiness,
           logs,
           audit,
           controls,
@@ -315,6 +320,7 @@
           })
         : null,
       activeTab === "Risk" ? h(RiskView, { state }) : null,
+      activeTab === "Ops" ? h(OpsView, { state }) : null,
       activeTab === "Logs" ? h(LogsView, { state }) : null,
       h(ConfirmCommandModal, {
         pendingCommand,
@@ -327,6 +333,7 @@
 
   function Header({ apiBase, autoRefresh, state, onRefresh, onToggleRefresh }) {
     const status = state.status || {};
+    const readiness = state.readiness;
     const mode = status.operator_mode || "paper";
     const stale = status.updated_at
       ? Date.now() - new Date(status.updated_at).getTime() > 15000
@@ -353,6 +360,10 @@
           tone: state.wsState === "live" ? "ok" : "warn",
         }),
         h(StatusPill, { label: mode.toUpperCase(), tone: mode === "live" ? "warn" : "ok" }),
+        h(StatusPill, {
+          label: readiness?.summary?.live_ready ? "PROD ready" : "PROD blocked",
+          tone: readiness?.summary?.live_ready ? "ok" : "danger",
+        }),
         h(StatusPill, { label: stale ? "STALE" : `updated ${ago(status.updated_at)}`, tone: stale ? "danger" : "ok" }),
         h("button", { className: "icon-button", onClick: onRefresh, title: "Refresh" }, "Refresh"),
         h(
@@ -740,6 +751,104 @@
           ],
         }),
         h("pre", { className: "json-box" }, JSON.stringify(state.controls || {}, null, 2))
+      )
+    );
+  }
+
+  function OpsView({ state }) {
+    const readiness = state.readiness || {};
+    const summary = readiness.summary || {};
+    const checks = readiness.checks || [];
+    const critical = checks.filter((check) => check.severity === "critical");
+    const warnings = checks.filter((check) => check.severity === "warning");
+    const data = readiness.data || {};
+    const latest = data.latest || {};
+    return h(
+      "section",
+      { className: "stack" },
+      h(
+        "div",
+        { className: "layout one-one" },
+        h(Panel, {
+          title: "Trader Readiness",
+          accent: summary.live_ready ? "ok" : "danger",
+        },
+          h(KpiGrid, {
+            items: [
+              ["Live Ready", summary.live_ready ? "YES" : "NO"],
+              ["Critical", summary.critical_count ?? "-"],
+              ["Warnings", summary.warning_count ?? "-"],
+              ["Active Prod", summary.active_prod || "-"],
+              ["Active Shadow", summary.active_shadow || "-"],
+              ["Fill Rate", pct(summary.fill_rate, 2)],
+              ["Paper Sharpe", num(summary.paper_sharpe, 4)],
+              ["Mark", num(summary.mark_price, 2)],
+            ],
+          }),
+          h(
+            "div",
+            { className: "pill-row" },
+            h(StatusPill, {
+              label: critical.length ? "live blocked" : "critical clear",
+              tone: critical.length ? "danger" : "ok",
+            }),
+            h(StatusPill, {
+              label: warnings.length ? "warnings open" : "warnings clear",
+              tone: warnings.length ? "warn" : "ok",
+            })
+          )
+        ),
+        h(Panel, { title: "Next Actions" },
+          h(
+            "ol",
+            { className: "action-list" },
+            ...((readiness.next_actions || []).map((action, idx) =>
+              h("li", { key: idx }, action)
+            ))
+          )
+        )
+      ),
+      h(Panel, { title: "Guardrail Findings" },
+        h(Table, {
+          rows: checks,
+          columns: ["severity", "code", "message"],
+        })
+      ),
+      h(
+        "div",
+        { className: "layout one-one" },
+        h(Panel, { title: "Data Freshness" },
+          h(KpiGrid, {
+            items: [
+              ["DB", data.exists ? "present" : "missing"],
+              ["OHLCV Rows", data.tables?.ohlcv ?? "-"],
+              ["Tick Rows", data.tables?.ticks ?? "-"],
+              ["Feature Rows", data.tables?.features ?? "-"],
+              ["Equity Rows", data.tables?.paper_equity_snapshots ?? "-"],
+              ["OHLCV Latest", latest.ohlcv || "-"],
+              ["Market Latest", latest.market_snapshots || "-"],
+              ["Equity Latest", latest.paper_equity_snapshots || "-"],
+            ],
+          }),
+          data.error
+            ? h("section", { className: "alert-line" }, data.error)
+            : null
+        ),
+        h(Panel, { title: "Live Gate Snapshot" },
+          h(KpiGrid, {
+            items: [
+              ["Gate", readiness.live_gate?.passed ? "PASSED" : "BLOCKED"],
+              ["Paper Days", num(readiness.live_gate?.metrics?.paper_days, 2)],
+              ["Trades", readiness.live_gate?.metrics?.total_trades ?? "-"],
+              ["Sharpe", num(readiness.live_gate?.metrics?.sharpe, 4)],
+              ["Max DD", pct(readiness.live_gate?.metrics?.max_drawdown, 2)],
+            ],
+          }),
+          h(ListBlock, {
+            title: "Gate Reasons",
+            rows: readiness.live_gate?.reasons || [],
+          })
+        )
       )
     );
   }

@@ -235,6 +235,56 @@ class BinanceRESTClient:
             return float(data["openInterest"])
         return None
 
+    async def fetch_exchange_info(self) -> Dict[str, Any]:
+        """Fetch current USD-M Futures trading rules and rate limits."""
+        data = await self._public_get("/fapi/v1/exchangeInfo")
+        return data if isinstance(data, dict) else {}
+
+    async def fetch_symbol_rules(self, symbol: str) -> Dict[str, Any]:
+        """Return exchange filters/order constraints for one symbol."""
+        exchange_info = await self.fetch_exchange_info()
+        for row in exchange_info.get("symbols", []):
+            if row.get("symbol") == symbol:
+                return {
+                    "symbol": symbol,
+                    "status": row.get("status"),
+                    "contract_type": row.get("contractType"),
+                    "margin_asset": row.get("marginAsset"),
+                    "order_types": row.get("orderTypes", []),
+                    "time_in_force": row.get("timeInForce", []),
+                    "filters": {
+                        item.get("filterType"): item for item in row.get("filters", [])
+                    },
+                    "rate_limits": exchange_info.get("rateLimits", []),
+                }
+        return {"symbol": symbol, "status": "MISSING", "filters": {}}
+
+    async def validate_symbol_execution_rules(
+        self,
+        symbol: str,
+        *,
+        require_post_only: bool = True,
+        require_usdc_margin: bool = True,
+    ) -> Dict[str, Any]:
+        """Build a live-startup checklist from Binance exchangeInfo."""
+        rules = await self.fetch_symbol_rules(symbol)
+        reasons: list[str] = []
+        if rules.get("status") != "TRADING":
+            reasons.append("symbol_not_trading")
+        if require_usdc_margin and rules.get("margin_asset") != "USDC":
+            reasons.append("margin_asset_not_usdc")
+        if require_post_only and "GTX" not in rules.get("time_in_force", []):
+            reasons.append("post_only_gtx_unavailable")
+        for required_filter in ("PRICE_FILTER", "LOT_SIZE", "MIN_NOTIONAL"):
+            if required_filter not in rules.get("filters", {}):
+                reasons.append(f"missing_{required_filter.lower()}")
+        return {
+            "symbol": symbol,
+            "ok": not reasons,
+            "reasons": reasons,
+            "rules": rules,
+        }
+
     async def fetch_klines(
         self,
         symbol: str,

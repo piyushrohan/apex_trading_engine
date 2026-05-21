@@ -182,6 +182,55 @@ async def test_shadow_lane_prioritizes_active_shadow_and_executes_hedges(
 
 @pytest.mark.asyncio
 @pytest.mark.mlops
+async def test_shadow_lane_quarantines_artifacts_that_fail_preflight(
+    tmp_path, mock_config, monkeypatch
+):
+    import src.mlops.shadow_lane as shadow_module
+
+    model_dir = tmp_path / "models" / "bad-shadow"
+    model_dir.mkdir(parents=True)
+    (model_dir / "gbm_model.pkl").write_bytes(b"native-crash-payload")
+
+    class FakeRegistry:
+        registry_data = {
+            "active_shadow": "bad-shadow",
+            "models": {"bad-shadow": {"type": "GBM", "status": "SHADOW"}},
+        }
+
+        def get_model_path(self, model_id):
+            return str(model_dir)
+
+    monkeypatch.setattr(
+        shadow_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=-11,
+            stderr="Segmentation fault",
+            stdout="",
+        ),
+    )
+    portfolio = PortfolioService(position_mode="one_way")
+    config = dict(mock_config)
+    config["shadow"] = {"enabled": True, "max_parallel_candidates": 1}
+
+    runner = ShadowLaneRunner(
+        config=config,
+        registry=FakeRegistry(),
+        portfolio=portfolio,
+        symbol="ETHUSDC",
+        operator_mode="paper",
+    )
+
+    assert runner.lanes == {}
+    assert "bad-shadow" in runner.disabled_candidates
+    assert (
+        "artifact_preflight_failed"
+        in runner.disabled_candidates["bad-shadow"]["reason"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.mlops
 async def test_shadow_lane_skips_empty_and_rejected_hedge_orders(mock_config):
     class RejectingRisk:
         def approve_order(self, *args, **kwargs):

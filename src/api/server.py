@@ -3,7 +3,10 @@
 import asyncio
 import json
 import logging
+import math
 import os
+from datetime import datetime, timezone
+from numbers import Real
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -27,6 +30,28 @@ AUDIT_PATH = Path(os.getenv("APEX_AUDIT_PATH", "data_lake/audit_events.jsonl"))
 CONTROL_STATE_PATH = Path(
     os.getenv("APEX_CONTROL_STATE_PATH", "data_lake/operator_controls.json")
 )
+DIAGNOSTIC_TABLE_QUERIES = {
+    "features": (
+        "SELECT COUNT(*) FROM features",
+        "SELECT MAX(timestamp) FROM features",
+    ),
+    "market_snapshots": (
+        "SELECT COUNT(*) FROM market_snapshots",
+        "SELECT MAX(timestamp) FROM market_snapshots",
+    ),
+    "ohlcv": (
+        "SELECT COUNT(*) FROM ohlcv",
+        "SELECT MAX(timestamp) FROM ohlcv",
+    ),
+    "paper_equity_snapshots": (
+        "SELECT COUNT(*) FROM paper_equity_snapshots",
+        "SELECT MAX(timestamp) FROM paper_equity_snapshots",
+    ),
+    "ticks": (
+        "SELECT COUNT(*) FROM ticks",
+        "SELECT MAX(timestamp) FROM ticks",
+    ),
+}
 
 app = FastAPI(
     title="APEX Trading Engine API",
@@ -105,11 +130,103 @@ def _page_rows(rows: list[Dict[str, Any]], limit: int, offset: int) -> Dict[str,
 def _records_from_df(df) -> list[Dict[str, Any]]:
     if df is None or df.empty:
         return []
-    normalized = df.copy()
+    normalized = df.copy().astype(object)
+    normalized = normalized.where(normalized.notna(), None)
+
+    def clean_cell(value: Any) -> Any:
+        if isinstance(value, Real) and not math.isfinite(float(value)):
+            return None
+        return value
+
+    normalized = normalized.apply(lambda column: column.map(clean_cell))
     for col in normalized.columns:
         if "time" in col:
-            normalized[col] = normalized[col].astype(str)
+            normalized[col] = normalized[col].map(
+                lambda value: str(value) if value is not None else None
+            )
     return normalized.to_dict(orient="records")
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _age_seconds(value: Any) -> Optional[float]:
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return None
+    return (datetime.now(timezone.utc) - parsed).total_seconds()
+
+
+def _add_check(
+    checks: list[Dict[str, Any]],
+    severity: str,
+    code: str,
+    message: str,
+    **metadata: Any,
+) -> None:
+    checks.append(
+        {
+            "severity": severity,
+            "code": code,
+            "message": message,
+            **metadata,
+        }
+    )
+
+
+def _latest_journal_decision(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    rows = _read_jsonl(_journal_path(config))
+    return rows[-1] if rows else None
+
+
+def _duckdb_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
+    db_path = _db_path(config)
+    if not Path(db_path).exists():
+        return {"db_path": db_path, "exists": False, "tables": {}, "latest": {}}
+    conn = None
+    try:
+        conn = duckdb.connect(db_path, read_only=True)
+        table_names = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+        tables = {}
+        latest = {}
+        for table, (count_sql, latest_sql) in DIAGNOSTIC_TABLE_QUERIES.items():
+            if table not in table_names:
+                continue
+            tables[table] = int(conn.execute(count_sql).fetchone()[0])
+            try:
+                latest_value = conn.execute(latest_sql).fetchone()[0]
+            except Exception:
+                latest_value = None
+            latest[table] = str(latest_value) if latest_value else None
+        return {
+            "db_path": db_path,
+            "exists": True,
+            "tables": tables,
+            "latest": latest,
+        }
+    except Exception as exc:
+        return {
+            "db_path": db_path,
+            "exists": True,
+            "tables": {},
+            "latest": {},
+            "error": str(exc),
+        }
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _append_audit(event: Dict[str, Any]) -> None:
@@ -338,6 +455,183 @@ def live_gate(book_id: str = "primary"):
         "metrics": result.metrics,
         "live_enabled": config.get("live", {}).get("enabled", False),
         "skip_paper_gate": config.get("live", {}).get("skip_paper_gate", False),
+    }
+
+
+@app.get("/ops/readiness")
+def ops_readiness(book_id: str = "primary"):
+    """Trader-facing live readiness checklist and operational guardrails."""
+    config = get_config()
+    store = get_status_store()
+    runtime = store.snapshot()
+    registry = ModelRegistry()
+    readiness = _production_readiness(registry)
+    paper = generate_paper_report(config=config, book_id=book_id)
+    gate_result = evaluate_paper_gate(
+        config, book_id=book_id, journal_path=_journal_path(config)
+    )
+    latest_decision = _latest_journal_decision(config)
+    db_snapshot = _duckdb_snapshot(config)
+    explain = runtime.get("last_explanation") or {}
+    checks: list[Dict[str, Any]] = []
+
+    runtime_age = _age_seconds(runtime.get("updated_at"))
+    if runtime_age is None:
+        _add_check(
+            checks,
+            "critical",
+            "runtime_status_missing",
+            "Runtime status has not been published yet.",
+        )
+    elif runtime_age > 60:
+        _add_check(
+            checks,
+            "critical",
+            "runtime_status_stale",
+            "Runtime status is stale for live supervision.",
+            age_seconds=round(runtime_age, 2),
+        )
+    elif runtime_age > 15:
+        _add_check(
+            checks,
+            "warning",
+            "runtime_status_lagging",
+            "Runtime status is lagging behind the expected operator heartbeat.",
+            age_seconds=round(runtime_age, 2),
+        )
+
+    if runtime.get("kill_switch_active"):
+        _add_check(
+            checks,
+            "critical",
+            "kill_switch_active",
+            "Kill switch is active; live trading must remain blocked.",
+        )
+
+    if not readiness.get("ready"):
+        _add_check(
+            checks,
+            "critical",
+            "prod_model_not_ready",
+            "No production-ready model is active.",
+            blockers=readiness.get("blockers", []),
+        )
+
+    if not gate_result.passed:
+        _add_check(
+            checks,
+            "critical",
+            "paper_to_live_gate_blocked",
+            "Paper-to-live gate has not passed.",
+            reasons=gate_result.reasons,
+        )
+
+    if int(paper.get("filled_orders") or 0) <= 0:
+        _add_check(
+            checks,
+            "warning",
+            "fill_evidence_missing",
+            "No maker fill evidence is available for the primary paper book.",
+        )
+    elif float(paper.get("fill_rate") or 0.0) <= 0.05:
+        _add_check(
+            checks,
+            "warning",
+            "fill_rate_low",
+            "Paper fill rate is too low to trust execution assumptions.",
+            fill_rate=paper.get("fill_rate"),
+        )
+
+    conviction = explain.get("conviction_score")
+    min_conviction = float(config.get("risk", {}).get("min_live_conviction", 0.55))
+    if conviction is not None and float(conviction) < min_conviction:
+        _add_check(
+            checks,
+            "warning",
+            "model_conviction_low",
+            "Latest model conviction is below the live review threshold.",
+            conviction=conviction,
+            min_conviction=min_conviction,
+        )
+
+    decision_age = _age_seconds((latest_decision or {}).get("timestamp"))
+    if decision_age is None:
+        _add_check(
+            checks,
+            "warning",
+            "decision_journal_missing",
+            "No persisted decision journal entry is available.",
+        )
+    elif decision_age > 300:
+        _add_check(
+            checks,
+            "warning",
+            "decision_journal_stale",
+            "Persisted decision journal is stale relative to runtime status.",
+            age_seconds=round(decision_age, 2),
+        )
+
+    if db_snapshot.get("error"):
+        _add_check(
+            checks,
+            "warning",
+            "duckdb_read_unavailable",
+            "DuckDB could not be read for operator diagnostics.",
+            error=db_snapshot["error"],
+        )
+    if db_snapshot.get("exists") and not db_snapshot.get("tables", {}).get("ticks", 0):
+        _add_check(
+            checks,
+            "warning",
+            "tick_history_missing",
+            "Tick history is empty; fill and microstructure analytics are limited.",
+        )
+
+    severity_order = {"critical": 2, "warning": 1, "info": 0}
+    critical_count = sum(1 for check in checks if check["severity"] == "critical")
+    warning_count = sum(1 for check in checks if check["severity"] == "warning")
+    live_ready = critical_count == 0
+    return {
+        "title": "APEX Trader Production Readiness",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "pass" if live_ready and warning_count == 0 else "blocked",
+        "summary": {
+            "live_ready": live_ready,
+            "critical_count": critical_count,
+            "warning_count": warning_count,
+            "operator_mode": runtime.get("operator_mode"),
+            "symbol": runtime.get("symbol"),
+            "mark_price": runtime.get("mark_price"),
+            "active_prod": registry.registry_data.get("active_prod"),
+            "active_shadow": registry.registry_data.get("active_shadow"),
+            "paper_sharpe": paper.get("sharpe"),
+            "fill_rate": paper.get("fill_rate"),
+        },
+        "checks": sorted(
+            checks,
+            key=lambda item: (-severity_order.get(item["severity"], 0), item["code"]),
+        ),
+        "runtime": runtime,
+        "paper": paper,
+        "live_gate": {
+            "passed": gate_result.passed,
+            "reasons": gate_result.reasons,
+            "metrics": gate_result.metrics,
+        },
+        "production_readiness": readiness,
+        "data": db_snapshot,
+        "next_actions": [
+            (
+                "Repair unsafe shadow artifacts and keep shadow lanes running "
+                "continuously."
+            ),
+            "Collect forward paper evidence with real maker fills before live review.",
+            "Promote only a manifest-backed PROD model after shadow evidence clears.",
+            (
+                "Keep data freshness, user stream, and kill-switch health visible "
+                "in cockpit."
+            ),
+        ],
     }
 
 

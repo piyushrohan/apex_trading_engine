@@ -171,6 +171,22 @@ venv/bin/pytest -q
 
 ---
 
+## Trader Production Readiness Backlog
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Quant critic backlog | DONE | `docs/TRADER_PRODUCTION_BACKLOG.md` converts the demo critique into P0/P1/P2 production work |
+| Shadow artifact quarantine | DONE | Shadow lane preflights GBM artifacts in a child process and disables unsafe candidates instead of crashing startup |
+| Trader readiness API | DONE | `/ops/readiness` summarizes live blockers, paper gate, fill evidence, model readiness, runtime freshness, and data diagnostics |
+| Cockpit Ops tab | DONE | Frontend adds `Ops` with guardrail findings, data freshness, live-gate snapshot, and next actions |
+| Exchange rule validation foundation | DONE | Binance REST client validates `exchangeInfo` constraints for USDC margin, `GTX`, price filter, lot size, and min notional |
+| Full order lifecycle analytics | TODO | Add persistent submit/ack/open/partial/cancel/replace/fill/reject telemetry |
+| Feature drift and label stability reports | TODO | Compare live data vs training snapshot and expose label sensitivity |
+| Separate kill-switch lanes | TODO | Split model, data, execution, account-sync, and manual operator kill switches |
+| Chart overlays and replay mode | TODO | Add candles with decisions/fills, probability history, shadow-vs-primary comparison, and session replay |
+
+---
+
 ## Changelog
 
 | Date | Change |
@@ -182,3 +198,4 @@ venv/bin/pytest -q
 | 2026-05-19 | **Milestone 7 complete** — metrics, observability compose, paper CI workflow, maker grid, and hedge attribution report |
 | 2026-05-19 | **Milestones 8–9 complete** — terminal API/frontend, active PROD loading, live prep hardening, partial paper fills, registry manifests, CI workflow wiring, and contextual bandit reward update path |
 | 2026-05-20 | **Model governance hardening** — experiment tracking, strict registry lifecycle, stress gates, readiness API/frontend, and live model evidence guard |
+| 2026-05-21 | **Trader production readiness** — added quant-critic backlog, shadow artifact quarantine, `/ops/readiness`, cockpit Ops tab, and exchange-rule validation foundation |

@@ -1,5 +1,7 @@
 import json
 import logging
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -49,6 +51,7 @@ class ShadowLaneRunner:
             )
         )
         self.lanes: Dict[str, Dict[str, Any]] = {}
+        self.disabled_candidates: Dict[str, Dict[str, Any]] = {}
         if self.enabled:
             self.refresh_candidates()
 
@@ -56,9 +59,26 @@ class ShadowLaneRunner:
         """Discover active shadow/evaluating registry candidates."""
         candidates = self._candidate_model_ids()
         self.lanes = {}
+        self.disabled_candidates = {}
         for model_id in candidates[: self.max_parallel]:
             meta = self.registry.registry_data["models"][model_id]
             book_id = f"shadow_{model_id}"
+            model_path = self.registry.get_model_path(model_id)
+            preflight_ok, preflight_reason = self._preflight_model_artifact(
+                model_id, model_path
+            )
+            if not preflight_ok:
+                self.disabled_candidates[model_id] = {
+                    "reason": preflight_reason,
+                    "artifact_path": str(model_path),
+                    "status": meta.get("status"),
+                }
+                logger.error(
+                    "Shadow model %s disabled after artifact preflight: %s",
+                    model_id,
+                    preflight_reason,
+                )
+                continue
             book = self.portfolio.get_or_create_book(
                 book_id=book_id,
                 role="shadow",
@@ -67,11 +87,18 @@ class ShadowLaneRunner:
                 initial_equity=self.initial_equity,
             )
             controller = MetaController(self.config)
-            model_path = self.registry.get_model_path(model_id)
             try:
                 controller.load_model_artifact(meta.get("type", "GBM"), model_path)
             except FileNotFoundError:
                 logger.warning("Shadow model artifact missing for %s", model_id)
+            except Exception as exc:
+                self.disabled_candidates[model_id] = {
+                    "reason": f"artifact_load_failed:{type(exc).__name__}:{exc}",
+                    "artifact_path": str(model_path),
+                    "status": meta.get("status"),
+                }
+                logger.exception("Shadow model artifact load failed for %s", model_id)
+                continue
             adapter = PaperExecutionAdapter(book_id=book_id)
             self.lanes[model_id] = {
                 "book": book,
@@ -96,6 +123,54 @@ class ShadowLaneRunner:
                 and model_id not in ids
             )
         return ids
+
+    def _preflight_model_artifact(
+        self, model_id: str, model_path: str
+    ) -> tuple[bool, str]:
+        """Load native artifacts in a child process so crashes do not kill runtime."""
+        if not self.config.get("shadow", {}).get("artifact_preflight_enabled", True):
+            return True, "preflight_disabled"
+        model_type = (
+            self.registry.registry_data.get("models", {})
+            .get(model_id, {})
+            .get("type", "GBM")
+        )
+        if model_type != "GBM":
+            return True, "unsupported_preflight_model_type"
+
+        path = Path(model_path)
+        artifact = path if path.is_file() else path / "gbm_model.pkl"
+        if not artifact.exists():
+            return True, "artifact_missing"
+
+        code = (
+            "import sys\n"
+            "from src.models.gbm_agent import GBMAgent\n"
+            "try:\n"
+            "    GBMAgent({}).load(sys.argv[1])\n"
+            "except Exception as exc:\n"
+            "    print(f'{type(exc).__name__}: {exc}', file=sys.stderr)\n"
+            "    sys.exit(2)\n"
+        )
+        timeout = float(
+            self.config.get("shadow", {}).get("artifact_preflight_timeout", 5)
+        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(path)],
+                cwd=str(Path.cwd()),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"artifact_preflight_timeout:{timeout:.1f}s"
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip() or "unknown_error"
+            return False, f"artifact_preflight_failed:{stderr}"
+        return True, "artifact_preflight_passed"
 
     async def run_tick(
         self,
