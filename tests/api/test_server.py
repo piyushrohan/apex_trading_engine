@@ -1,5 +1,6 @@
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
@@ -822,3 +823,353 @@ async def test_ws_status_logs_disconnect():
     await server_module.ws_status(websocket)
 
     assert websocket.accepted is True
+
+
+@pytest.mark.unit
+def test_order_lifecycle_endpoint_reads_db_and_summarizes(
+    client, tmp_path, monkeypatch
+):
+    import src.api.server as server_module
+
+    db_path = str(tmp_path / "orders.duckdb")
+    cache = DuckDBCacheManager(db_path)
+    cache.insert_order_lifecycle_event(
+        {
+            "timestamp": "2026-05-21T00:00:00+00:00",
+            "event": "submitted",
+            "order_id": "o1",
+            "symbol": "ETHUSDC",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 100.0,
+            "status": "PENDING",
+            "execution_mode": "paper",
+            "book_id": "primary",
+            "metadata": {},
+        }
+    )
+    cache.insert_order_lifecycle_event(
+        {
+            "timestamp": "2026-05-21T00:00:01+00:00",
+            "event": "filled",
+            "order_id": "o1",
+            "symbol": "ETHUSDC",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 100.0,
+            "status": "FILLED",
+            "execution_mode": "paper",
+            "book_id": "primary",
+            "queue_age_ms": 1000.0,
+            "metadata": {},
+        }
+    )
+    cache.close()
+    server_module._config = None
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "data": {"storage": {"db_path": db_path}},
+            "execution": {},
+            "paper": {},
+            "live": {},
+        },
+    )
+
+    body = client.get("/orders/lifecycle").json()
+
+    assert body["summary"]["submitted"] == 1
+    assert body["summary"]["fills"] == 1
+    assert body["items"][0]["event"] == "filled"
+
+
+@pytest.mark.unit
+def test_model_drift_endpoint_reports_warning(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    db_path = str(tmp_path / "drift.duckdb")
+    cache = DuckDBCacheManager(db_path)
+    raw = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-05-21", periods=20, freq="3min"),
+            "symbol": "ETHUSDC",
+            "timeframe": "3m",
+            "open": range(100, 120),
+            "high": range(101, 121),
+            "low": range(99, 119),
+            "close": range(100, 120),
+            "volume": range(10, 30),
+        }
+    )
+    cache.insert_ohlcv(raw)
+    cache.close()
+
+    class FakeRegistry:
+        registry_data = {
+            "active_prod": "prod-v1",
+            "active_shadow": None,
+            "models": {
+                "prod-v1": {
+                    "metrics": {
+                        "feature_reference": {
+                            "rows": 100,
+                            "features": {"feature_0": {"mean": -1.0, "std": 0.01}},
+                        }
+                    }
+                }
+            },
+        }
+
+    server_module._config = None
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "data": {
+                "target_symbol": "ETHUSDC",
+                "target_interval": "3m",
+                "storage": {"db_path": db_path},
+            },
+            "paper": {},
+            "live": {},
+        },
+    )
+    monkeypatch.setattr(server_module, "ModelRegistry", lambda *a, **k: FakeRegistry())
+
+    body = client.get("/models/drift").json()
+
+    assert body["model_id"] == "prod-v1"
+    assert body["status"] in {"warning", "critical"}
+    assert body["features"][0]["feature"] == "feature_0"
+
+
+@pytest.mark.unit
+def test_control_kill_switch_lanes_are_persisted(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    control_path = tmp_path / "controls.json"
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(server_module, "CONTROL_STATE_PATH", control_path)
+    monkeypatch.setattr(server_module, "AUDIT_PATH", audit_path)
+
+    kill = client.post(
+        "/control/kill-switch",
+        json={"confirm": True, "lane": "data", "reason": "stale feed"},
+    ).json()
+    clear = client.post(
+        "/control/clear-kill-switch",
+        json={"confirm": True, "lane": "data", "reason": "feed repaired"},
+    ).json()
+
+    assert kill["state_after"]["kill_switch_lanes"]["data"]["active"] is True
+    assert clear["state_after"]["kill_switch_lanes"]["data"]["active"] is False
+
+
+@pytest.mark.unit
+def test_server_helper_edges_and_duckdb_diagnostics(tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    class BadCompare:
+        def __ne__(self, other):
+            raise TypeError("cannot compare")
+
+    rows = server_module._records_from_df(
+        pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2026-05-21T00:00:00Z")],
+                "bad": [BadCompare()],
+                "missing": [float("nan")],
+            }
+        )
+    )
+    assert rows[0]["timestamp"].startswith("2026-05-21")
+    assert rows[0]["missing"] is None
+
+    parsed = server_module._parse_timestamp(datetime(2026, 5, 21, 1, 2, 3))
+    assert parsed.tzinfo is not None
+    assert server_module._parse_timestamp(None) is None
+    assert server_module._parse_timestamp("not-a-date") is None
+    assert server_module._age_seconds("not-a-date") is None
+
+    db_path = tmp_path / "diag.duckdb"
+    cache = DuckDBCacheManager(str(db_path))
+    cache.insert_ohlcv(
+        pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp("2026-05-21T00:00:00")],
+                "symbol": ["ETHUSDC"],
+                "timeframe": ["3m"],
+                "open": [100.0],
+                "high": [101.0],
+                "low": [99.0],
+                "close": [100.5],
+                "volume": [10.0],
+            }
+        )
+    )
+    cache.close()
+
+    snapshot = server_module._duckdb_snapshot(
+        {"data": {"storage": {"db_path": str(db_path)}}}
+    )
+    assert snapshot["exists"] is True
+    assert snapshot["tables"]["ohlcv"] == 1
+    missing = server_module._duckdb_snapshot(
+        {"data": {"storage": {"db_path": str(tmp_path / "missing.duckdb")}}}
+    )
+    assert missing["exists"] is False
+
+    monkeypatch.setattr(
+        server_module.duckdb,
+        "connect",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    errored = server_module._duckdb_snapshot(
+        {"data": {"storage": {"db_path": str(db_path)}}}
+    )
+    assert errored["error"] == "boom"
+
+
+@pytest.mark.unit
+def test_server_fallback_order_lifecycle_and_drift_read_errors(tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    db_path = tmp_path / "orders.duckdb"
+    db_path.touch()
+    lifecycle_path = tmp_path / "orders.jsonl"
+    lifecycle_path.write_text(
+        json.dumps({"book_id": "primary", "event": "submitted", "order_id": "o1"})
+        + "\n"
+        + json.dumps({"book_id": "shadow", "event": "submitted", "order_id": "o2"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class BrokenCache:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(server_module, "DuckDBCacheManager", BrokenCache)
+    rows = server_module._load_order_lifecycle_rows(
+        {
+            "data": {"storage": {"db_path": str(db_path)}},
+            "execution": {"order_lifecycle_path": str(lifecycle_path)},
+        }
+    )
+    assert rows == [{"book_id": "primary", "event": "submitted", "order_id": "o1"}]
+
+    registry = SimpleNamespace(registry_data={"active_prod": "prod-v1", "models": {}})
+    drift = server_module._feature_drift_snapshot(
+        {
+            "data": {
+                "storage": {"db_path": str(db_path)},
+                "target_symbol": "ETHUSDC",
+                "target_interval": "3m",
+            }
+        },
+        registry,
+    )
+    assert drift["reason"] == "duckdb_read_failed"
+
+
+@pytest.mark.unit
+def test_ops_readiness_surfaces_runtime_execution_and_drift_risks(
+    tmp_path, monkeypatch
+):
+    import src.api.server as server_module
+
+    config = {
+        "risk": {"min_live_conviction": 0.9},
+        "data": {"storage": {"db_path": str(tmp_path / "missing.duckdb")}},
+        "paper": {},
+        "live": {},
+    }
+    monkeypatch.setattr(server_module, "get_config", lambda: config)
+    monkeypatch.setattr(
+        server_module,
+        "ModelRegistry",
+        lambda: SimpleNamespace(
+            registry_data={"active_prod": None, "active_shadow": "shadow-v1"}
+        ),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_production_readiness",
+        lambda registry: {"ready": False, "blockers": ["missing_prod"]},
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_feature_drift_snapshot",
+        lambda config, registry: {"status": "critical", "max_abs_z": 5.5},
+    )
+    monkeypatch.setattr(
+        server_module,
+        "generate_paper_report",
+        lambda **kwargs: {"filled_orders": 0, "fill_rate": 0.0, "sharpe": 0.0},
+    )
+    monkeypatch.setattr(
+        server_module,
+        "evaluate_paper_gate",
+        lambda *args, **kwargs: SimpleNamespace(
+            passed=False, reasons=["not_enough_paper"], metrics={}
+        ),
+    )
+    monkeypatch.setattr(server_module, "_latest_journal_decision", lambda config: None)
+    monkeypatch.setattr(
+        server_module,
+        "_duckdb_snapshot",
+        lambda config: {
+            "exists": True,
+            "tables": {"ticks": 0},
+            "latest": {},
+            "error": "read failed",
+        },
+    )
+    monkeypatch.setattr(
+        server_module,
+        "_load_order_lifecycle_rows",
+        lambda *args, **kwargs: [
+            {"event": "submitted", "book_id": "primary", "order_id": "o1"},
+            {"event": "rejected", "book_id": "primary", "order_id": "o2"},
+        ],
+    )
+
+    store = get_status_store()
+    monkeypatch.setattr(store, "_load_persisted", lambda: None)
+    with store._lock:
+        store.updated_at = None
+        store.kill_switch_active = True
+        store.kill_switch_lanes = {
+            "execution": {"active": True, "reason": "venue_down"}
+        }
+        store.last_explanation = {"conviction_score": 0.1}
+
+    report = server_module.ops_readiness()
+    codes = {check["code"] for check in report["checks"]}
+    assert report["status"] == "blocked"
+    assert "runtime_status_missing" in codes
+    assert "kill_switch_active" in codes
+    assert "prod_model_not_ready" in codes
+    assert "paper_to_live_gate_blocked" in codes
+    assert "fill_evidence_missing" in codes
+    assert "order_lifecycle_missing_fills" in codes
+    assert "order_rejections_present" in codes
+    assert "model_conviction_low" in codes
+    assert "decision_journal_missing" in codes
+    assert "duckdb_read_unavailable" in codes
+    assert "tick_history_missing" in codes
+    assert "feature_drift_detected" in codes
+
+    now = datetime.now(timezone.utc)
+    with store._lock:
+        store.updated_at = (now - timedelta(seconds=90)).isoformat()
+        store.kill_switch_active = False
+        store.kill_switch_lanes = {}
+    stale = server_module.ops_readiness()
+    assert "runtime_status_stale" in {check["code"] for check in stale["checks"]}
+
+    with store._lock:
+        store.updated_at = (now - timedelta(seconds=20)).isoformat()
+    lagging = server_module.ops_readiness()
+    assert "runtime_status_lagging" in {check["code"] for check in lagging["checks"]}

@@ -17,9 +17,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.status_store import get_status_store
 from src.core.config_loader import load_config
 from src.data.cache_manager import DuckDBCacheManager
+from src.execution.kill_switch import (
+    active_kill_switch_lanes,
+    kill_switch_active,
+    normalize_kill_switch_lanes,
+    set_kill_switch_lane,
+)
 from src.execution.live_gate import evaluate_paper_gate
+from src.execution.order_lifecycle import summarize_order_lifecycle
 from src.mlops.experiment_tracker import ExperimentTracker
 from src.mlops.explainability import ExplainabilityEngine
+from src.mlops.feature_drift import (
+    compare_feature_drift,
+    latest_feature_frame_from_ohlcv,
+)
 from src.mlops.promotion_service import PromotionService
 from src.mlops.registry import ModelRegistry
 from src.reports.hedge_report import generate_hedge_report
@@ -42,6 +53,10 @@ DIAGNOSTIC_TABLE_QUERIES = {
     "ohlcv": (
         "SELECT COUNT(*) FROM ohlcv",
         "SELECT MAX(timestamp) FROM ohlcv",
+    ),
+    "order_lifecycle_events": (
+        "SELECT COUNT(*) FROM order_lifecycle_events",
+        "SELECT MAX(timestamp) FROM order_lifecycle_events",
     ),
     "paper_equity_snapshots": (
         "SELECT COUNT(*) FROM paper_equity_snapshots",
@@ -93,6 +108,12 @@ def _decision_path(config: Dict[str, Any]) -> str:
     )
 
 
+def _order_lifecycle_path(config: Dict[str, Any]) -> str:
+    return config.get("execution", {}).get(
+        "order_lifecycle_path", "data_lake/order_lifecycle.jsonl"
+    )
+
+
 def _db_path(config: Dict[str, Any]) -> str:
     return (
         config.get("data", {})
@@ -130,21 +151,33 @@ def _page_rows(rows: list[Dict[str, Any]], limit: int, offset: int) -> Dict[str,
 def _records_from_df(df) -> list[Dict[str, Any]]:
     if df is None or df.empty:
         return []
-    normalized = df.copy().astype(object)
-    normalized = normalized.where(normalized.notna(), None)
 
     def clean_cell(value: Any) -> Any:
-        if isinstance(value, Real) and not math.isfinite(float(value)):
+        if value is None:
             return None
+        try:
+            if isinstance(value, Real) and not math.isfinite(float(value)):
+                return None
+        except (TypeError, ValueError):
+            pass
+        try:
+            if value != value:
+                return None
+        except (TypeError, ValueError):
+            pass
         return value
 
-    normalized = normalized.apply(lambda column: column.map(clean_cell))
-    for col in normalized.columns:
-        if "time" in col:
-            normalized[col] = normalized[col].map(
-                lambda value: str(value) if value is not None else None
-            )
-    return normalized.to_dict(orient="records")
+    records = df.copy().astype(object).to_dict(orient="records")
+    cleaned: list[Dict[str, Any]] = []
+    for row in records:
+        cleaned_row = {}
+        for key, value in row.items():
+            safe_value = clean_cell(value)
+            if safe_value is not None and "time" in key:
+                safe_value = str(safe_value)
+            cleaned_row[key] = safe_value
+        cleaned.append(cleaned_row)
+    return cleaned
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
@@ -189,6 +222,84 @@ def _add_check(
 def _latest_journal_decision(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     rows = _read_jsonl(_journal_path(config))
     return rows[-1] if rows else None
+
+
+def _load_order_lifecycle_rows(
+    config: Dict[str, Any], book_id: str = "primary", limit: int = 500
+) -> list[Dict[str, Any]]:
+    db_path = _db_path(config)
+    if Path(db_path).exists():
+        cache = None
+        try:
+            cache = DuckDBCacheManager(db_path=db_path, read_only=True)
+            df = cache.load_order_lifecycle_events(book_id=book_id, limit=limit)
+            return _records_from_df(df)
+        except Exception as exc:
+            logger.debug("Order lifecycle DB read unavailable: %s", exc)
+        finally:
+            if cache is not None:
+                cache.close()
+    rows = list(reversed(_read_jsonl(_order_lifecycle_path(config))))
+    rows = [row for row in rows if row.get("book_id") == book_id]
+    return rows[: max(1, min(limit, 2000))]
+
+
+def _model_feature_reference(
+    registry: ModelRegistry, model_id: Optional[str]
+) -> Dict[str, Any]:
+    models = registry.registry_data.get("models", {})
+    model = models.get(model_id or "") if model_id else None
+    if not model:
+        return {}
+    metrics = model.get("metrics", {}) or {}
+    metadata = model.get("metadata", {}) or {}
+    return metrics.get("feature_reference") or metadata.get("feature_reference") or {}
+
+
+def _feature_drift_snapshot(
+    config: Dict[str, Any], registry: ModelRegistry, model_id: Optional[str] = None
+) -> Dict[str, Any]:
+    selected = (
+        model_id
+        or registry.registry_data.get("active_prod")
+        or registry.registry_data.get("active_shadow")
+    )
+    reference = _model_feature_reference(registry, selected)
+    symbol = config.get("data", {}).get("target_symbol", "ETHUSDC")
+    timeframe = config.get("data", {}).get("target_interval", "3m")
+    db_path = _db_path(config)
+    if not Path(db_path).exists():
+        return {
+            "model_id": selected,
+            "status": "unavailable",
+            "reason": "duckdb_missing",
+            "symbol": symbol,
+            "timeframe": timeframe,
+        }
+    cache = None
+    try:
+        cache = DuckDBCacheManager(db_path=db_path, read_only=True)
+        ohlcv = cache.load_ohlcv(symbol, timeframe)
+    except Exception as exc:
+        return {
+            "model_id": selected,
+            "status": "unavailable",
+            "reason": "duckdb_read_failed",
+            "error": str(exc),
+            "symbol": symbol,
+            "timeframe": timeframe,
+        }
+    finally:
+        if cache is not None:
+            cache.close()
+    current = latest_feature_frame_from_ohlcv(ohlcv.tail(500))
+    report = compare_feature_drift(reference, current)
+    return {
+        "model_id": selected,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        **report,
+    }
 
 
 def _duckdb_snapshot(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -240,6 +351,7 @@ def _load_control_state() -> Dict[str, Any]:
         return {
             "paused": False,
             "kill_switch_requested": False,
+            "kill_switch_lanes": normalize_kill_switch_lanes({}),
             "flatten_requested_at": None,
             "mode_request": None,
             "risk_profile_request": None,
@@ -317,17 +429,43 @@ def record_control_command(command: str, payload: Optional[Dict[str, Any]] = Non
         state = {}
     state.setdefault("paused", False)
     state.setdefault("kill_switch_requested", False)
+    state["kill_switch_lanes"] = normalize_kill_switch_lanes(
+        state.get("kill_switch_lanes")
+    )
 
     if command == "pause":
         state["paused"] = True
     elif command == "resume":
         state["paused"] = False
     elif command == "kill-switch":
-        state["kill_switch_requested"] = True
-        get_status_store().update(kill_switch_active=True)
+        lane = body.get("lane", "manual")
+        state["kill_switch_lanes"] = set_kill_switch_lane(
+            state["kill_switch_lanes"],
+            lane,
+            active=True,
+            reason=body.get("reason"),
+        )
+        state["kill_switch_requested"] = kill_switch_active(state["kill_switch_lanes"])
+        get_status_store().update(
+            kill_switch_active=state["kill_switch_requested"],
+            kill_switch_lanes=state["kill_switch_lanes"],
+        )
     elif command == "clear-kill-switch":
-        state["kill_switch_requested"] = False
-        get_status_store().update(kill_switch_active=False)
+        lane = body.get("lane")
+        if lane:
+            state["kill_switch_lanes"] = set_kill_switch_lane(
+                state["kill_switch_lanes"],
+                lane,
+                active=False,
+                reason=body.get("reason"),
+            )
+        else:
+            state["kill_switch_lanes"] = normalize_kill_switch_lanes({})
+        state["kill_switch_requested"] = kill_switch_active(state["kill_switch_lanes"])
+        get_status_store().update(
+            kill_switch_active=state["kill_switch_requested"],
+            kill_switch_lanes=state["kill_switch_lanes"],
+        )
     elif command == "flatten":
         state["flatten_requested_at"] = now
     elif command == "set-mode":
@@ -466,12 +604,15 @@ def ops_readiness(book_id: str = "primary"):
     runtime = store.snapshot()
     registry = ModelRegistry()
     readiness = _production_readiness(registry)
+    drift = _feature_drift_snapshot(config, registry)
     paper = generate_paper_report(config=config, book_id=book_id)
     gate_result = evaluate_paper_gate(
         config, book_id=book_id, journal_path=_journal_path(config)
     )
     latest_decision = _latest_journal_decision(config)
     db_snapshot = _duckdb_snapshot(config)
+    lifecycle_rows = _load_order_lifecycle_rows(config, book_id=book_id, limit=500)
+    lifecycle_summary = summarize_order_lifecycle(lifecycle_rows)
     explain = runtime.get("last_explanation") or {}
     checks: list[Dict[str, Any]] = []
 
@@ -506,6 +647,11 @@ def ops_readiness(book_id: str = "primary"):
             "critical",
             "kill_switch_active",
             "Kill switch is active; live trading must remain blocked.",
+            active_lanes=list(
+                active_kill_switch_lanes(
+                    normalize_kill_switch_lanes(runtime.get("kill_switch_lanes"))
+                )
+            ),
         )
 
     if not readiness.get("ready"):
@@ -540,6 +686,22 @@ def ops_readiness(book_id: str = "primary"):
             "fill_rate_low",
             "Paper fill rate is too low to trust execution assumptions.",
             fill_rate=paper.get("fill_rate"),
+        )
+    if lifecycle_summary["submitted"] and not lifecycle_summary["fills"]:
+        _add_check(
+            checks,
+            "warning",
+            "order_lifecycle_missing_fills",
+            "Order lifecycle telemetry has submissions but no fills.",
+            submitted=lifecycle_summary["submitted"],
+        )
+    if lifecycle_summary["rejects"]:
+        _add_check(
+            checks,
+            "warning",
+            "order_rejections_present",
+            "Order lifecycle contains rejected orders that need execution review.",
+            rejects=lifecycle_summary["rejects"],
         )
 
     conviction = explain.get("conviction_score")
@@ -586,6 +748,14 @@ def ops_readiness(book_id: str = "primary"):
             "tick_history_missing",
             "Tick history is empty; fill and microstructure analytics are limited.",
         )
+    if drift.get("status") in {"warning", "critical"}:
+        _add_check(
+            checks,
+            "warning" if drift.get("status") == "warning" else "critical",
+            "feature_drift_detected",
+            "Current feature distribution has drifted from the active model reference.",
+            max_abs_z=drift.get("max_abs_z"),
+        )
 
     severity_order = {"critical": 2, "warning": 1, "info": 0}
     critical_count = sum(1 for check in checks if check["severity"] == "critical")
@@ -602,6 +772,11 @@ def ops_readiness(book_id: str = "primary"):
             "operator_mode": runtime.get("operator_mode"),
             "symbol": runtime.get("symbol"),
             "mark_price": runtime.get("mark_price"),
+            "active_kill_switch_lanes": list(
+                active_kill_switch_lanes(
+                    normalize_kill_switch_lanes(runtime.get("kill_switch_lanes"))
+                )
+            ),
             "active_prod": registry.registry_data.get("active_prod"),
             "active_shadow": registry.registry_data.get("active_shadow"),
             "paper_sharpe": paper.get("sharpe"),
@@ -613,12 +788,17 @@ def ops_readiness(book_id: str = "primary"):
         ),
         "runtime": runtime,
         "paper": paper,
+        "order_lifecycle": {
+            "summary": lifecycle_summary,
+            "recent": lifecycle_rows[:20],
+        },
         "live_gate": {
             "passed": gate_result.passed,
             "reasons": gate_result.reasons,
             "metrics": gate_result.metrics,
         },
         "production_readiness": readiness,
+        "feature_drift": drift,
         "data": db_snapshot,
         "next_actions": [
             (
@@ -633,6 +813,27 @@ def ops_readiness(book_id: str = "primary"):
             ),
         ],
     }
+
+
+@app.get("/orders/lifecycle")
+def order_lifecycle(book_id: str = "primary", limit: int = 500):
+    """Order lifecycle telemetry and execution-quality summary."""
+    config = get_config()
+    rows = _load_order_lifecycle_rows(config, book_id=book_id, limit=limit)
+    return {
+        "book_id": book_id,
+        "items": rows,
+        "total": len(rows),
+        "summary": summarize_order_lifecycle(rows),
+    }
+
+
+@app.get("/models/drift")
+def model_drift(model_id: Optional[str] = None):
+    """Compare current feature distributions with active model training evidence."""
+    config = get_config()
+    registry = ModelRegistry()
+    return _feature_drift_snapshot(config, registry, model_id=model_id)
 
 
 @app.get("/history/decisions")

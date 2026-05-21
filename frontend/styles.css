@@ -363,6 +363,33 @@ button:disabled {
   stroke: var(--accent);
 }
 
+.replay-chart {
+  min-height: 180px;
+}
+
+.decision-dot {
+  stroke: #061018;
+  stroke-width: 2px;
+}
+
+.decision-dot-ok {
+  fill: var(--ok);
+}
+
+.decision-dot-warn {
+  fill: var(--warn);
+}
+
+.decision-dot-danger {
+  fill: var(--danger);
+}
+
+.fill-marker {
+  fill: #d7f2ff;
+  stroke: #061018;
+  stroke-width: 1.5px;
+}
+
 .empty-chart {
   min-height: 160px;
   display: grid;

@@ -3,6 +3,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from src.execution.adapters.base import ExecutionAdapter, OrderRequest, OrderResult
+from src.execution.order_lifecycle import OrderLifecycleRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +19,12 @@ class PaperExecutionAdapter(ExecutionAdapter):
         book_id: str = "primary",
         tick_size: float = 0.01,
         maker_fee_pct: float = 0.0,
+        lifecycle_recorder: Optional[OrderLifecycleRecorder] = None,
     ):
         self.book_id = book_id
         self.tick_size = tick_size
         self.maker_fee_pct = maker_fee_pct
+        self.lifecycle_recorder = lifecycle_recorder
         self._open_orders: Dict[str, Dict[str, Any]] = {}
         self._fills: List[Dict[str, Any]] = []
 
@@ -33,6 +36,17 @@ class PaperExecutionAdapter(ExecutionAdapter):
             )
 
         order_id = request.client_order_id or f"paper_{uuid.uuid4().hex[:12]}"
+        self._record_lifecycle(
+            "submitted",
+            order_id=order_id,
+            symbol=request.symbol,
+            side=request.side.upper(),
+            quantity=request.quantity,
+            price=request.price,
+            status="PENDING",
+            position_side=request.position_side or "BOTH",
+            client_order_id=request.client_order_id,
+        )
         record = {
             "orderId": order_id,
             "symbol": request.symbol,
@@ -50,12 +64,34 @@ class PaperExecutionAdapter(ExecutionAdapter):
             f"[PAPER:{self.book_id}] Placed {record['side']} "
             f"{request.quantity} @ {request.price} ({order_id})"
         )
+        self._record_lifecycle(
+            "open",
+            order_id=order_id,
+            symbol=request.symbol,
+            side=record["side"],
+            quantity=request.quantity,
+            price=request.price,
+            status="NEW",
+            position_side=record["positionSide"],
+            client_order_id=request.client_order_id,
+        )
         return OrderResult(success=True, order_id=order_id, status="NEW", raw=record)
 
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         if order_id in self._open_orders:
+            order = self._open_orders[order_id]
             self._open_orders[order_id]["status"] = "CANCELED"
             del self._open_orders[order_id]
+            self._record_lifecycle(
+                "canceled",
+                order_id=order_id,
+                symbol=symbol,
+                side=order.get("side"),
+                quantity=order.get("origQty"),
+                price=order.get("price"),
+                status="CANCELED",
+                position_side=order.get("positionSide"),
+            )
             return True
         return False
 
@@ -124,6 +160,23 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 "aggressor_side": aggressor_side,
             }
             self._fills.append(fill)
+            self._record_lifecycle(
+                "filled" if done else "partially_filled",
+                order_id=order_id,
+                symbol=symbol,
+                side=side,
+                quantity=qty,
+                price=limit_price,
+                status=fill["status"],
+                position_side=fill.get("positionSide"),
+                fill_price=market_price,
+                mark_price_after=market_price,
+                metadata={
+                    "cumulative_executed_qty": total_executed,
+                    "aggressor_side": aggressor_side,
+                    "fee": fee,
+                },
+            )
             if done:
                 del self._open_orders[order_id]
             else:
@@ -140,6 +193,23 @@ class PaperExecutionAdapter(ExecutionAdapter):
             oid for oid, o in self._open_orders.items() if o.get("symbol") == symbol
         ]
         for oid in to_cancel:
+            order = self._open_orders[oid]
             self._open_orders[oid]["status"] = "CANCELED"
             del self._open_orders[oid]
+            self._record_lifecycle(
+                "canceled",
+                order_id=oid,
+                symbol=symbol,
+                side=order.get("side"),
+                quantity=order.get("origQty"),
+                price=order.get("price"),
+                status="CANCELED",
+                position_side=order.get("positionSide"),
+                reason="flatten_all_virtual_orders",
+            )
         return len(to_cancel)
+
+    def _record_lifecycle(self, event: str, **kwargs: Any) -> None:
+        if self.lifecycle_recorder is None:
+            return
+        self.lifecycle_recorder.record(event, **kwargs)

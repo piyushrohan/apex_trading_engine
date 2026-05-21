@@ -14,6 +14,7 @@ data_lake/orderflow/*
 data_lake/runtime_status.json
 data_lake/runtime_status.tmp
 data_lake/trade_journal.jsonl
+data_lake/order_lifecycle.jsonl
 data_lake/hedge_bandit/
 data_lake/mlops/
 

@@ -107,6 +107,32 @@ class DuckDBCacheManager:
         """
         )
 
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS order_lifecycle_events (
+                timestamp TIMESTAMP,
+                event VARCHAR,
+                order_id VARCHAR,
+                symbol VARCHAR,
+                side VARCHAR,
+                quantity DOUBLE,
+                price DOUBLE,
+                status VARCHAR,
+                execution_mode VARCHAR,
+                book_id VARCHAR,
+                position_side VARCHAR,
+                exchange_order_id VARCHAR,
+                client_order_id VARCHAR,
+                reason VARCHAR,
+                queue_age_ms DOUBLE,
+                fill_price DOUBLE,
+                mark_price_after DOUBLE,
+                metadata_json VARCHAR,
+                PRIMARY KEY (order_id, event, timestamp)
+            )
+        """
+        )
+
         logger.info("DuckDB schemas initialized.")
 
     def insert_ohlcv(self, df: pd.DataFrame):
@@ -233,6 +259,55 @@ class DuckDBCacheManager:
         """,
             [timestamp, symbol, funding_rate, open_interest, mark_price],
         )
+
+    def insert_order_lifecycle_event(self, event: dict) -> None:
+        """Persist one order lifecycle event for execution-quality analytics."""
+        metadata = event.get("metadata") or {}
+        self.conn.execute(
+            """
+            INSERT INTO order_lifecycle_events
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (order_id, event, timestamp) DO NOTHING
+        """,
+            [
+                event.get("timestamp"),
+                event.get("event"),
+                event.get("order_id"),
+                event.get("symbol"),
+                event.get("side"),
+                event.get("quantity"),
+                event.get("price"),
+                event.get("status"),
+                event.get("execution_mode"),
+                event.get("book_id"),
+                event.get("position_side"),
+                event.get("exchange_order_id"),
+                event.get("client_order_id"),
+                event.get("reason"),
+                event.get("queue_age_ms"),
+                event.get("fill_price"),
+                event.get("mark_price_after"),
+                json.dumps(metadata),
+            ],
+        )
+
+    def load_order_lifecycle_events(
+        self,
+        symbol: Optional[str] = None,
+        book_id: Optional[str] = None,
+        limit: int = 500,
+    ) -> pd.DataFrame:
+        query = "SELECT * FROM order_lifecycle_events WHERE 1=1"
+        params: list = []
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+        if book_id:
+            query += " AND book_id = ?"
+            params.append(book_id)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(max(1, min(limit, 2000)))
+        return self.conn.execute(query, params).df()
 
     def detect_ohlcv_gaps(
         self, symbol: str, timeframe: str
