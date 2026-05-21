@@ -50,8 +50,12 @@ test("runbook cockpit exposes process controls and guided workflow", () => {
   assert.match(app, /\/ops\/workflow/);
   assert.match(app, /\/ops\/processes/);
   assert.match(app, /function RunbookView/);
+  assert.match(app, /function ProcessCard/);
   assert.match(app, /requestProcessAction/);
-  assert.match(app, /Start \$\{name\}/);
+  assert.match(app, /One Command Runtime/);
+  assert.match(app, /Local Control Center/);
+  assert.match(app, /START LIVE/);
+  assert.match(app, /Restart/);
 });
 
 test("live cockpit subscribes to direct market websocket chart", () => {

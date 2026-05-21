@@ -540,7 +540,22 @@ def test_ops_workflow_and_process_controls(client, tmp_path, monkeypatch):
             }
 
     class FakeProcessManager:
-        SPECS = {"paper": object(), "training": object()}
+        SPECS = {
+            "paper": SimpleNamespace(
+                label="Paper trading", category="trading", danger_level="safe"
+            ),
+            "training": SimpleNamespace(
+                label="Train / retrain", category="mlops", danger_level="moderate"
+            ),
+            "live": SimpleNamespace(
+                label="Live trading", category="trading", danger_level="critical"
+            ),
+            "model_governance": SimpleNamespace(
+                label="Evaluate model governance",
+                category="evaluation",
+                danger_level="safe",
+            ),
+        }
 
         def __init__(self):
             self.started = []
@@ -558,10 +573,37 @@ def test_ops_workflow_and_process_controls(client, tmp_path, monkeypatch):
                     "name": "training",
                     "running": True,
                     "pid": 123,
+                    "returncode": None,
                     "description": "training loop",
                     "log_path": "logs/train.log",
                 },
+                "live": {
+                    "name": "live",
+                    "running": False,
+                    "returncode": None,
+                    "label": "Live trading",
+                    "category": "trading",
+                    "danger_level": "critical",
+                    "description": "live loop",
+                    "log_path": "logs/live.log",
+                },
+                "model_governance": {
+                    "name": "model_governance",
+                    "running": False,
+                    "returncode": 0,
+                    "label": "Evaluate model governance",
+                    "category": "evaluation",
+                    "danger_level": "safe",
+                    "description": "governance report",
+                    "log_path": "logs/gov.log",
+                },
             }
+
+        def capabilities(self):
+            return [
+                {"name": name, "label": spec.label, "category": spec.category}
+                for name, spec in self.SPECS.items()
+            ]
 
         def start(self, process_name, dry_run=False):
             if process_name not in self.SPECS:
@@ -574,6 +616,18 @@ def test_ops_workflow_and_process_controls(client, tmp_path, monkeypatch):
                 raise KeyError(process_name)
             self.stopped.append((process_name, dry_run))
             return {"name": process_name, "running": False, "dry_run": dry_run}
+
+        def restart(self, process_name, dry_run=False):
+            if process_name not in self.SPECS:
+                raise KeyError(process_name)
+            self.stopped.append((process_name, dry_run))
+            self.started.append((process_name, dry_run))
+            return {
+                "name": process_name,
+                "running": not dry_run,
+                "dry_run": dry_run,
+                "restarted": True,
+            }
 
     manager = FakeProcessManager()
     audit_path = tmp_path / "audit.jsonl"
@@ -595,31 +649,59 @@ def test_ops_workflow_and_process_controls(client, tmp_path, monkeypatch):
     workflow = client.get("/ops/workflow").json()
     assert workflow["registry"]["active_shadow"] == "shadow-v1"
     assert workflow["processes"]["training"]["running"] is True
-    assert {step["id"] for step in workflow["steps"]} >= {"paper", "train", "prod"}
+    assert workflow["start_command"] == "make start"
+    assert {step["id"] for step in workflow["steps"]} >= {
+        "paper",
+        "train",
+        "evaluate",
+        "prod",
+        "live",
+    }
 
     processes = client.get("/ops/processes").json()
-    assert processes["allowed"] == ["paper", "training"]
+    assert set(processes["allowed"]) >= {"paper", "training", "live"}
     assert processes["processes"]["paper"]["running"] is False
 
     rejected = client.post("/ops/processes/paper", json={"action": "start"})
     assert rejected.status_code == 400
-    bad_action = client.post(
+    invalid_action = client.post(
+        "/ops/processes/paper", json={"confirm": True, "action": "explode"}
+    )
+    assert invalid_action.status_code == 400
+    restarted = client.post(
         "/ops/processes/paper", json={"confirm": True, "action": "restart"}
     )
-    assert bad_action.status_code == 400
+    assert restarted.status_code == 200
+    assert restarted.json()["state_after"]["restarted"] is True
     started = client.post(
         "/ops/processes/paper",
         json={"confirm": True, "action": "start", "dry_run": True},
     ).json()
     assert started["state_after"]["dry_run"] is True
-    assert manager.started == [("paper", True)]
+    assert manager.started == [("paper", False), ("paper", True)]
 
     stopped = client.post(
         "/ops/processes/training",
         json={"confirm": True, "action": "stop", "reason": "operator stop"},
     ).json()
     assert stopped["state_after"]["running"] is False
-    assert manager.stopped == [("training", False)]
+    assert manager.stopped == [("paper", False), ("training", False)]
+
+    live_without_phrase = client.post(
+        "/ops/processes/live",
+        json={"confirm": True, "action": "start"},
+    )
+    assert live_without_phrase.status_code == 400
+    live_started = client.post(
+        "/ops/processes/live",
+        json={
+            "confirm": True,
+            "action": "start",
+            "confirm_phrase": "START LIVE",
+        },
+    ).json()
+    assert live_started["payload"]["danger_level"] == "critical"
+    assert manager.started[-1] == ("live", False)
 
     invalid = client.post(
         "/ops/processes/nope",

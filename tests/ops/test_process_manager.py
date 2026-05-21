@@ -53,6 +53,38 @@ def test_process_manager_start_stop_with_fake_popen(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_process_manager_restart_reuses_allowlisted_command(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            self.running = True
+
+        def poll(self):
+            return None if self.running else self.returncode
+
+        def wait(self, timeout=None):
+            self.running = False
+            self.returncode = 0
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr("src.ops.process_manager.os.killpg", lambda *a, **k: None)
+
+    manager = LocalProcessManager(cwd=tmp_path, log_dir=tmp_path / "logs")
+    manager.start("paper")
+    restarted = manager.restart("paper")
+
+    assert restarted["restarted"] is True
+    assert len(calls) == 2
+    assert calls[-1][0][0][-1] == "src.pipelines.paper_trade"
+
+
+@pytest.mark.unit
 def test_process_manager_already_running_dry_stop_and_already_stopped(
     tmp_path, monkeypatch
 ):
@@ -82,7 +114,7 @@ def test_process_manager_already_running_dry_stop_and_already_stopped(
     stopped = manager.stop("paper")
     assert stopped["stopped"] is True
     assert manager.stop("paper")["already_stopped"] is True
-    assert set(manager.list_processes()) == {"paper", "training"}
+    assert set(manager.list_processes()) >= {"paper", "training", "live"}
 
 
 @pytest.mark.unit
@@ -148,12 +180,13 @@ def test_cockpit_launch_from_args_builds_all_processes(tmp_path, monkeypatch):
     processes = launch_from_args(args)
 
     assert [item.name for item in processes] == [
-        "api",
         "frontend",
+        "api",
         "paper",
         "training",
     ]
-    assert launched[0]["env"]["APEX_API_PORT"] == "8080"
+    assert launched[1]["env"]["APEX_API_PORT"] == "8080"
+    assert launched[1]["env"]["APEX_FRONTEND_PORT"] == "5173"
     assert launched[2]["env"]["APEX_EXECUTION_MODE"] == "paper"
 
 
@@ -285,6 +318,7 @@ def test_cockpit_once_prints_plan(capsys):
     assert "Frontend: http://127.0.0.1:5173/" in output
     assert "Paper: on" in output
     assert "Training: on" in output
+    assert "Live: off" in output
 
 
 @pytest.mark.unit
@@ -294,3 +328,15 @@ def test_cockpit_parser_defaults():
     assert args.api_port == 8080
     assert args.frontend_port == 5173
     assert args.paper is False
+    assert args.live is False
+
+
+@pytest.mark.unit
+def test_process_manager_catalog_includes_live_and_report_jobs(tmp_path):
+    manager = LocalProcessManager(cwd=tmp_path, log_dir=tmp_path / "logs")
+    statuses = manager.list_processes()
+
+    assert statuses["live"]["danger_level"] == "critical"
+    assert statuses["live"]["command"][-1] == "src.pipelines.live_trade"
+    assert statuses["model_governance"]["long_running"] is False
+    assert "--format" in statuses["model_governance"]["command"]

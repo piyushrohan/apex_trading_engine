@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import Any, Dict
 
+from src.core.config_loader import load_config
 from src.mlops.registry import ModelRegistry
 from src.models.meta_controller import MetaController
 
@@ -75,3 +76,20 @@ class ShadowTradePipeline:
     async def stop(self):
         self._running = False
         logger.info("Shadow pipeline stopped.")
+
+
+async def main(config_path: str = "configs/base.yaml"):
+    """Run the standalone shadow lane process from the operator cockpit."""
+    pipeline = ShadowTradePipeline(load_config(config_path))
+    try:
+        await pipeline.start()
+    except KeyboardInterrupt:
+        await pipeline.stop()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    asyncio.run(main())

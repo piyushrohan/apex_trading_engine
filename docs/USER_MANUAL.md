@@ -40,11 +40,12 @@ Run the validation suite before operating:
 PATH="$PWD/venv/bin:$PATH" make ci-local
 ```
 
-Start the cockpit, API, frontend, and paper loop with one command:
+Start the cockpit with one command. This starts the frontend first, then the API
+behind it:
 
 ```bash
 source venv/bin/activate
-python -m src.ops.cockpit --paper
+make start
 ```
 
 Open the terminal:
@@ -53,11 +54,20 @@ Open the terminal:
 http://127.0.0.1:5173/?api=http://127.0.0.1:8080
 ```
 
-If you want only the API and frontend first, omit `--paper` and use the
-frontend `Runbook` tab to start paper trading or training later:
+From the browser `Runbook` tab you can start, stop, or restart the supervised
+jobs for paper trading, training, evaluation reports, health checks, and guarded
+live trading. The direct Python command is equivalent:
 
 ```bash
 python -m src.ops.cockpit
+```
+
+Optional launch flags still exist:
+
+```bash
+python -m src.ops.cockpit --paper
+python -m src.ops.cockpit --train
+python -m src.ops.cockpit --once --paper --train --live
 ```
 
 Manual three-terminal mode is still supported:
@@ -340,9 +350,20 @@ The browser terminal in `frontend/` is a static React app. It polls the API and
 subscribes to `/ws/status` for runtime state and `/ws/market` for the live price
 tape. Its operator controls record auditable intent in
 `data_lake/operator_controls.json`. The trading pipeline consumes that state.
-The `Runbook` tab reads `/ops/workflow` and `/ops/processes` so paper trading
-and retraining can be started or stopped from the browser after the API runtime
-is up.
+The `Runbook` tab reads `/ops/workflow` and `/ops/processes` so the browser can
+control the supervised local allow-list:
+
+- paper trading
+- guarded live trading
+- standalone shadow observation
+- governed training/retraining
+- model governance evaluation
+- paper health watchdog
+- shadow sanity monitor
+- DuckDB/data freshness check
+- experiment ledger audit
+- frontend/API contract smoke
+- paper and hedge reports
 
 Control commands:
 
@@ -361,7 +382,8 @@ controlled process restart.
 
 APEX now has a lower-latency local operating path:
 
-- `python -m src.ops.cockpit --paper` starts the supervised local stack.
+- `make start` starts the frontend, API, and browser-driven control center.
+- `python -m src.ops.cockpit --paper` additionally starts the paper loop.
 - `/ws/market` streams Binance mark, aggregate trade, and depth events directly
   to the browser live chart.
 - `api.status_ws_interval_sec` controls runtime websocket cadence.
@@ -1142,11 +1164,21 @@ live:
   skip_paper_gate: false
 ```
 
-6. Start live.
+6. Start live from the browser or terminal.
 
 ```bash
 python -m src.pipelines.live_trade
 ```
+
+Browser path:
+
+```text
+Runbook -> Local Control Center -> Live trading -> Start
+```
+
+The API requires the `START LIVE` confirmation payload, and the live pipeline
+still blocks startup unless live config, credentials, paper evidence, risk, and
+production-model readiness are acceptable.
 
 7. Keep frontend open and watch:
 
