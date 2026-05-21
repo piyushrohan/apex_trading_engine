@@ -1,1 +1,1 @@
-"""HTTP API for read-only operator visibility."""
+"""HTTP API for operator visibility, controls, and local runtime workflow."""

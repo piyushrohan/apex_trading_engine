@@ -7,19 +7,19 @@ data:
   target_interval: "3m"
   macro_intervals: ["5m", "15m", "30m"]
 
-  stream_safety_delay_sec: 1.2
+  stream_safety_delay_sec: 0.4
 
   ingestion:
     enabled: true
     initial_backfill_days: 7
-    tick_flush_size: 100
+    tick_flush_size: 25
     funding_poll_sec: 300
     repair_gaps: true
 
   market_state:
     lookback_bars: 200
 
-  loop_interval_sec: 3.0
+  loop_interval_sec: 1.0
 
   storage:
     type: "duckdb"
@@ -152,6 +152,10 @@ observability:
   metrics:
     enabled: true
     port: 9108
+
+api:
+  status_ws_interval_sec: 0.5
+  market_ws_timeout_sec: 15.0
 
 shadow:
   enabled: true

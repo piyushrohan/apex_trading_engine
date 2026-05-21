@@ -44,8 +44,9 @@ class MetadataRegistry(FakeRegistry):
 
 
 class FakeCache:
-    def __init__(self, db_path):
+    def __init__(self, db_path, read_only=False):
         self.db_path = db_path
+        self.read_only = read_only
         self.closed = False
 
     def load_ohlcv(self, symbol, interval):
@@ -73,7 +74,9 @@ class FakeUUID:
 
 
 @pytest.mark.mlops
-def test_auto_retrain_registers_and_promotes_safe_candidate(mock_config, monkeypatch):
+def test_auto_retrain_registers_and_promotes_safe_candidate(
+    mock_config, monkeypatch, tmp_path
+):
     """Verify nightly retrain promotes a candidate that passes safety gates."""
 
     class PassingEvaluator:
@@ -88,7 +91,13 @@ def test_auto_retrain_registers_and_promotes_safe_candidate(mock_config, monkeyp
     monkeypatch.setattr(auto_retrain, "ModelEvaluator", PassingEvaluator)
     monkeypatch.setattr(auto_retrain.uuid, "uuid4", lambda: FakeUUID())
 
-    pipeline = AutoRetrainPipeline(mock_config)
+    db_path = tmp_path / "apex.duckdb"
+    db_path.touch()
+    config = {
+        **mock_config,
+        "data": {**mock_config["data"], "storage": {"db_path": str(db_path)}},
+    }
+    pipeline = AutoRetrainPipeline(config)
     result = pipeline.execute_nightly_retrain()
 
     assert pipeline.registry.registered[0][0] == "gbm_ethusdc_vabcdef12"
@@ -98,6 +107,7 @@ def test_auto_retrain_registers_and_promotes_safe_candidate(mock_config, monkeyp
     assert "label_quality" in pipeline.registry.metrics_updates[0][1]
     assert "classifier_quality" in pipeline.registry.metrics_updates[0][1]
     assert pipeline.registry.metrics_updates[0][1]["quality_gate"]["passed"] is True
+    assert pipeline.cache.read_only is True
     assert pipeline.cache.closed is True
     assert result["status"] == "completed"
 

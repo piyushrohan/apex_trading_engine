@@ -522,6 +522,228 @@ def test_control_validation_and_all_command_transitions(client, tmp_path, monkey
 
 
 @pytest.mark.unit
+def test_ops_workflow_and_process_controls(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    class FakeRegistry:
+        registry_data = {
+            "models": {},
+            "active_prod": None,
+            "active_shadow": "shadow-v1",
+        }
+
+        def production_readiness(self, model_id=None):
+            return {
+                "model_id": None,
+                "ready": False,
+                "blockers": ["no_active_prod_model"],
+            }
+
+    class FakeProcessManager:
+        SPECS = {"paper": object(), "training": object()}
+
+        def __init__(self):
+            self.started = []
+            self.stopped = []
+
+        def list_processes(self):
+            return {
+                "paper": {
+                    "name": "paper",
+                    "running": False,
+                    "description": "paper loop",
+                    "log_path": "logs/paper.log",
+                },
+                "training": {
+                    "name": "training",
+                    "running": True,
+                    "pid": 123,
+                    "description": "training loop",
+                    "log_path": "logs/train.log",
+                },
+            }
+
+        def start(self, process_name, dry_run=False):
+            if process_name not in self.SPECS:
+                raise KeyError(process_name)
+            self.started.append((process_name, dry_run))
+            return {"name": process_name, "running": not dry_run, "dry_run": dry_run}
+
+        def stop(self, process_name, dry_run=False):
+            if process_name not in self.SPECS:
+                raise KeyError(process_name)
+            self.stopped.append((process_name, dry_run))
+            return {"name": process_name, "running": False, "dry_run": dry_run}
+
+    manager = FakeProcessManager()
+    audit_path = tmp_path / "audit.jsonl"
+    server_module._config = None
+    monkeypatch.setattr(server_module, "ModelRegistry", lambda: FakeRegistry())
+    monkeypatch.setattr(server_module, "PROCESS_MANAGER", manager)
+    monkeypatch.setattr(server_module, "AUDIT_PATH", audit_path)
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "data": {"target_symbol": "ETHUSDC", "storage": {}},
+            "api": {"status_ws_interval_sec": 0.25},
+            "paper": {},
+            "live": {},
+        },
+    )
+
+    workflow = client.get("/ops/workflow").json()
+    assert workflow["registry"]["active_shadow"] == "shadow-v1"
+    assert workflow["processes"]["training"]["running"] is True
+    assert {step["id"] for step in workflow["steps"]} >= {"paper", "train", "prod"}
+
+    processes = client.get("/ops/processes").json()
+    assert processes["allowed"] == ["paper", "training"]
+    assert processes["processes"]["paper"]["running"] is False
+
+    rejected = client.post("/ops/processes/paper", json={"action": "start"})
+    assert rejected.status_code == 400
+    bad_action = client.post(
+        "/ops/processes/paper", json={"confirm": True, "action": "restart"}
+    )
+    assert bad_action.status_code == 400
+    started = client.post(
+        "/ops/processes/paper",
+        json={"confirm": True, "action": "start", "dry_run": True},
+    ).json()
+    assert started["state_after"]["dry_run"] is True
+    assert manager.started == [("paper", True)]
+
+    stopped = client.post(
+        "/ops/processes/training",
+        json={"confirm": True, "action": "stop", "reason": "operator stop"},
+    ).json()
+    assert stopped["state_after"]["running"] is False
+    assert manager.stopped == [("training", False)]
+
+    invalid = client.post(
+        "/ops/processes/nope",
+        json={"confirm": True, "action": "start"},
+    )
+    assert invalid.status_code == 404
+
+
+@pytest.mark.unit
+def test_market_ws_event_normalization():
+    import src.api.server as server_module
+
+    assert "ethusdc@depth5@100ms" in server_module._market_stream_url(
+        {"data": {"urls": {"ws_stream": "wss://example.test/stream"}}},
+        "ETHUSDC",
+    )
+    assert server_module._normalize_market_ws_event({"data": []}) is None
+    assert (
+        server_module._normalize_market_ws_event(
+            {"stream": "ethusdc@markPrice@1s", "data": {"s": "ETHUSDC"}}
+        )
+        is None
+    )
+    assert (
+        server_module._normalize_market_ws_event(
+            {"stream": "ethusdc@aggTrade", "data": {"s": "ETHUSDC"}}
+        )
+        is None
+    )
+    assert server_module._normalize_market_ws_event({"stream": "unknown"}) is None
+    mark = server_module._normalize_market_ws_event(
+        {
+            "stream": "ethusdc@markPrice@1s",
+            "data": {"s": "ETHUSDC", "p": "2400.25", "E": "not-ms"},
+        }
+    )
+    trade = server_module._normalize_market_ws_event(
+        {
+            "stream": "ethusdc@aggTrade",
+            "data": {
+                "s": "ETHUSDC",
+                "p": "2401.0",
+                "q": "0.15",
+                "m": True,
+                "T": 1770000000100,
+            },
+        }
+    )
+    depth = server_module._normalize_market_ws_event(
+        {
+            "stream": "ethusdc@depth5@100ms",
+            "data": {
+                "s": "ETHUSDC",
+                "b": [["2400.0", "1"]],
+                "a": [["2402.0", "1"]],
+                "E": 1770000000200,
+            },
+        }
+    )
+
+    assert mark["type"] == "mark"
+    assert mark["price"] == 2400.25
+    assert trade["type"] == "trade"
+    assert trade["is_buyer_maker"] is True
+    assert depth["type"] == "depth"
+    assert depth["mid_price"] == 2401.0
+    assert depth["spread_bps"] > 0
+
+
+@pytest.mark.unit
+def test_market_websocket_streams_normalized_payloads(client, tmp_path, monkeypatch):
+    import src.api.server as server_module
+
+    class FakeUpstream:
+        def __init__(self):
+            self.messages = [
+                json.dumps(
+                    {
+                        "stream": "ethusdc@markPrice@1s",
+                        "data": {"s": "ETHUSDC", "p": "2400.25"},
+                    }
+                )
+            ]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def recv(self):
+            if self.messages:
+                return self.messages.pop(0)
+            raise RuntimeError("stream finished")
+
+    server_module._config = None
+    monkeypatch.setattr(
+        server_module,
+        "load_config",
+        lambda *a, **k: {
+            "data": {
+                "target_symbol": "ETHUSDC",
+                "urls": {"ws_stream": "wss://example.test/stream"},
+            },
+            "api": {"market_ws_timeout_sec": 0.1},
+        },
+    )
+    monkeypatch.setattr(
+        server_module.websockets, "connect", lambda *a, **k: FakeUpstream()
+    )
+
+    with client.websocket_connect("/ws/market?symbol=ETHUSDC") as ws:
+        connected = ws.receive_json()
+        mark = ws.receive_json()
+        error = ws.receive_json()
+
+    assert connected["type"] == "connected"
+    assert mark["type"] == "mark"
+    assert mark["price"] == 2400.25
+    assert error["type"] == "error"
+    assert error["message"] == "stream finished"
+
+
+@pytest.mark.unit
 def test_decision_history_ignores_invalid_json_and_filters_mode(
     client, tmp_path, monkeypatch
 ):

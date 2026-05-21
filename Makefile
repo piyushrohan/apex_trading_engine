@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-risk test-integration test-replay frontend-test coverage lint format typecheck ci-local setup
+.PHONY: test test-unit test-risk test-integration test-replay frontend-test coverage lint format typecheck ci-local setup cockpit cockpit-plan
 
 # Parallel execution by default for speed, except for strict risk tests
 test:
@@ -49,3 +49,9 @@ ci-local:
 
 setup:
 	bash scripts/setup_dev.sh
+
+cockpit:
+	python -m src.ops.cockpit --paper
+
+cockpit-plan:
+	python -m src.ops.cockpit --once --paper --train

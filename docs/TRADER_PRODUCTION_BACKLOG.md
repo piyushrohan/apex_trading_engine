@@ -5,6 +5,12 @@ work. The goal is not to make APEX trade more often. The goal is to make it
 trade only when data, model evidence, execution quality, and risk controls are
 strong enough to justify live market exposure.
 
+> Next requirements source: [Institutional Quant Development Requirements](./INSTITUTIONAL_QUANT_DEVELOPMENT_REQUIREMENTS.md)
+> expands this backlog into the next institutional development program:
+> alpha research, multi-asset portfolio intelligence, true replay simulation,
+> advanced models, research cockpit tooling, self-healing operations, and the
+> future distributed infrastructure path.
+
 ## Implemented In This PR
 
 | Area | Status | Detail |
@@ -18,7 +24,10 @@ strong enough to justify live market exposure.
 | Feature drift visibility | DONE | Auto-retrain stores active training feature references; `/models/drift` and `/ops/readiness` compare current features against model evidence and warn on drift. |
 | Lane-specific kill switches | DONE | Manual, model, data, execution, and account-sync kill-switch lanes are persisted independently and visible in status/readiness/cockpit controls. |
 | Trader replay overlays | DONE | The browser history view now combines market path, decisions, fills, probability history, and order-fill timeline for post-session review. |
-| 98% coverage gate | DONE | Full strict local suite passes `venv/bin/pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=98` at 98.06%. |
+| One-command cockpit | DONE | `python -m src.ops.cockpit --paper` starts the API, frontend, and optional paper/training child processes with logs under `logs/`. |
+| Browser runbook controls | DONE | `GET /ops/workflow`, `GET /ops/processes`, and `POST /ops/processes/{process_name}` let the frontend start/stop allow-listed paper and training processes after API runtime starts. |
+| Live price tape | DONE | `WS /ws/market` streams Binance mark, trade, and depth events directly into a browser live chart with latency fields. |
+| 98% coverage gate | DONE | Full strict local suite passes `venv/bin/pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=98` at 98.12%. |
 
 ## P0 Before Live
 
@@ -65,11 +74,12 @@ strong enough to justify live market exposure.
 | Item | Target Behavior |
 | --- | --- |
 | Candles with decisions | DONE foundation: history replay chart overlays decisions and fills over recent market path; true OHLC candles/order-book ladder remain a visual upgrade. |
-| Order book ladder | Show spread, best bid/ask, depth imbalance, and quote placement. |
+| Order book ladder | PARTIAL: `/ws/market` now exposes best bid/ask and spread bps; full ladder depth and quote placement overlay remain. |
 | Fill timeline | DONE: order lifecycle table shows event, order id, side, quantity, queue age, fill price, and post-fill drift. |
 | Probability history | DONE: history view charts recent confidence/probability trajectory from persisted decisions. |
 | Shadow vs primary comparison | Show candidate PnL, drawdown, fill quality, decisions, and divergence from primary. |
 | Replay mode | DONE foundation: browser history view supports session-style review from persisted decisions, market rows, and lifecycle events; step-through playback remains a future interaction polish. |
+| Live chart | DONE: cockpit Live tab charts direct websocket price ticks without waiting for DuckDB history refresh. |
 
 ## Production Efficiency Target
 

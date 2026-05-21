@@ -40,18 +40,11 @@ Run the validation suite before operating:
 PATH="$PWD/venv/bin:$PATH" make ci-local
 ```
 
-Start the backend API in terminal 1:
+Start the cockpit, API, frontend, and paper loop with one command:
 
 ```bash
 source venv/bin/activate
-python -m src.api.server
-```
-
-Start the static frontend in terminal 2:
-
-```bash
-source venv/bin/activate
-python -m http.server 5173 --directory frontend
+python -m src.ops.cockpit --paper
 ```
 
 Open the terminal:
@@ -60,12 +53,19 @@ Open the terminal:
 http://127.0.0.1:5173/?api=http://127.0.0.1:8080
 ```
 
-Start paper trading in terminal 3:
+If you want only the API and frontend first, omit `--paper` and use the
+frontend `Runbook` tab to start paper trading or training later:
 
 ```bash
-source venv/bin/activate
-export APEX_EXECUTION_MODE=paper
-python -m src.pipelines.paper_trade
+python -m src.ops.cockpit
+```
+
+Manual three-terminal mode is still supported:
+
+```bash
+python -m src.api.server
+python -m http.server 5173 --directory frontend
+APEX_EXECUTION_MODE=paper python -m src.pipelines.paper_trade
 ```
 
 Check the API:
@@ -325,15 +325,24 @@ GET  /models
 GET  /models/lifecycle
 GET  /models/promotion/status
 GET  /live/gate
+GET  /ops/readiness
+GET  /ops/workflow
+GET  /ops/processes
 GET  /audit
 GET  /control/state
 POST /control/{command}
+POST /ops/processes/{process_name}
 WS   /ws/status
+WS   /ws/market
 ```
 
 The browser terminal in `frontend/` is a static React app. It polls the API and
-subscribes to `/ws/status`. Its operator controls record auditable intent in
+subscribes to `/ws/status` for runtime state and `/ws/market` for the live price
+tape. Its operator controls record auditable intent in
 `data_lake/operator_controls.json`. The trading pipeline consumes that state.
+The `Runbook` tab reads `/ops/workflow` and `/ops/processes` so paper trading
+and retraining can be started or stopped from the browser after the API runtime
+is up.
 
 Control commands:
 
@@ -347,6 +356,25 @@ Control commands:
 
 `set-mode` records intent, but an actual paper/live mode change requires a
 controlled process restart.
+
+### Low-Latency And HFT Boundary
+
+APEX now has a lower-latency local operating path:
+
+- `python -m src.ops.cockpit --paper` starts the supervised local stack.
+- `/ws/market` streams Binance mark, aggregate trade, and depth events directly
+  to the browser live chart.
+- `api.status_ws_interval_sec` controls runtime websocket cadence.
+- `data.loop_interval_sec` controls the trading decision loop cadence.
+- `data.ingestion.tick_flush_size` controls how quickly buffered ticks are
+  flushed into DuckDB.
+
+This is useful for fast retail/exchange automation and for measuring latency in
+the cockpit. It is not true institutional HFT. Real HFT would require exchange
+co-location or proximity hosting, deterministic networking, kernel bypass or
+specialized market-data handlers, a much thinner order gateway, strict clock
+sync, and exchange-native queue-position analytics. Treat this codebase as a
+latency-aware autonomous trading engine, not a co-located microsecond platform.
 
 ## Setup And First Run
 
@@ -1129,6 +1157,7 @@ python -m src.pipelines.live_trade
 - latest explanation
 - audit log
 - API websocket status
+- live price websocket status and tick latency
 
 ## Common Operator Workflows
 

@@ -1,8 +1,14 @@
 # APEX Institutional AI Trading System
 
-APEX is a production-oriented autonomous trading engine for **Binance USD-M Futures on ETHUSDC**. It combines live market-data ingestion, maker-only execution, strict risk controls, explainable model decisions, MLOps shadow lanes, hedge-strategy selection, and a read-only operator API/terminal.
+APEX is a production-oriented autonomous trading engine for **Binance USD-M Futures on ETHUSDC**. It combines live market-data ingestion, maker-only execution, strict risk controls, explainable model decisions, MLOps shadow lanes, hedge-strategy selection, and an operator API/terminal.
 
-The project is currently implemented through the roadmap's Milestone 9 plus the trader production hardening backlog: paper/live operator modes, MLOps shadow lanes, live startup hardening, contextual hedge-bandit support, order lifecycle telemetry, feature drift visibility, lane-specific kill switches, replay-style frontend review, observability hooks, reporting, and a high-coverage local/CI validation suite.
+The project is currently implemented through the original implementation
+milestones plus the trader production hardening backlog: paper/live operator
+modes, MLOps shadow lanes, live startup hardening, contextual hedge-bandit
+support, order lifecycle telemetry, feature drift visibility, lane-specific kill
+switches, replay-style frontend review, browser runbook controls, direct live
+price streaming, observability hooks, reporting, and a high-coverage local/CI
+validation suite.
 
 ## Current Status
 
@@ -12,8 +18,8 @@ Latest local validation snapshot:
 venv/bin/ruff check src tests
 node --check frontend/app.js
 venv/bin/pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=98
-# 323 passed
-# Required test coverage of 98% reached. Total coverage: 98.06%
+# 337 passed
+# Required test coverage of 98% reached. Total coverage: 98.12%
 ```
 
 Full local CI-style gate:
@@ -98,7 +104,7 @@ make test-risk
 ### Explainability, API, Terminal, And Reports
 
 - Explainability v2 adds confidence buckets, market narrative, position lifecycle context, risk factors, and portfolio sync explanations.
-- Read-only FastAPI service exposes:
+- FastAPI operator service exposes:
   - `GET /health`
   - `GET /status`
   - `GET /explain/latest`
@@ -109,8 +115,13 @@ make test-risk
   - `GET /orders/lifecycle`
   - `GET /models/drift`
   - `GET /ops/readiness`
+  - `GET /ops/workflow`
+  - `GET /ops/processes`
   - `GET /control/state`
+  - `POST /control/{command}`
+  - `POST /ops/processes/{process_name}`
   - `WS /ws/status`
+  - `WS /ws/market`
 - Static frontend terminal in `frontend/` reads API status, explainability, portfolio, models, readiness, order lifecycle, and metrics views.
 - Trader production readiness view exposes live blockers, paper gate status,
   fill evidence, model readiness, runtime freshness, and data health through
@@ -128,7 +139,7 @@ apex_trading_engine/
 ├── .github/workflows/        # CI, paper validation, model evaluation, shadow checks
 ├── configs/                  # Base config and risk profiles
 ├── data_lake/                # Local DuckDB/Parquet/runtime artifacts (git-ignored)
-├── docs/                     # Roadmap, progress, testing runbook
+├── docs/                     # Requirements, progress, testing runbook
 ├── frontend/                 # Static operator terminal
 ├── ops/                      # Prometheus config
 ├── scripts/                  # Dev setup helpers
@@ -151,8 +162,9 @@ apex_trading_engine/
 For a full operator guide covering architecture, startup, frontend/backend use,
 training, configuration, model logic, and live safety, read
 [APEX User Manual](docs/USER_MANUAL.md). For the current model-quality gates
-around labels, calibration, and promotion blockers, see
-[Model Quality Upgrade](docs/MODEL_QUALITY_UPGRADE.md).
+around labels, calibration, promotion blockers, and the next institutional
+research roadmap, see
+[Institutional Quant Development Requirements](docs/INSTITUTIONAL_QUANT_DEVELOPMENT_REQUIREMENTS.md).
 
 ### 1. Create The Environment
 
@@ -250,7 +262,40 @@ make coverage
 open htmlcov/index.html
 ```
 
-### 4. Run Paper Mode
+### 4. One-Command Operator Cockpit
+
+The easiest local workflow starts the API and static terminal together. Add
+`--paper` when you want the supervised paper loop running immediately:
+
+```bash
+source venv/bin/activate
+python -m src.ops.cockpit --paper
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173/?api=http://127.0.0.1:8080
+```
+
+Useful variants:
+
+```bash
+# API + frontend only; start paper/training later from the Runbook tab
+python -m src.ops.cockpit
+
+# show the launch plan without starting child processes
+python -m src.ops.cockpit --once --paper --train
+
+# start retraining beside the cockpit after enough data exists
+python -m src.ops.cockpit --train
+```
+
+The frontend `Runbook` tab shows the guided paper -> train -> shadow -> PROD
+workflow and can start/stop the allow-listed local `paper` and `training`
+processes after the API is up.
+
+### 5. Run Paper Mode Manually
 
 Paper is the safe default operator mode. It uses live market data with a virtual primary book:
 
@@ -261,7 +306,7 @@ python -m src.pipelines.paper_trade
 
 The module currently defaults to `configs/base.yaml`; direct programmatic callers can pass a config path through `main(config_path)`.
 
-### 5. Run Live Mode
+### 6. Run Live Mode
 
 Live mode places real signed orders. Keep this behind paper validation and operator review:
 
@@ -290,7 +335,7 @@ Start live mode:
 python -m src.pipelines.live_trade
 ```
 
-### 6. Run The API And Terminal
+### 7. Run The API And Terminal Manually
 
 API:
 
@@ -302,6 +347,8 @@ curl http://127.0.0.1:8080/explain/latest
 curl http://127.0.0.1:8080/portfolio
 curl http://127.0.0.1:8080/metrics/paper
 curl http://127.0.0.1:8080/ops/readiness
+curl http://127.0.0.1:8080/ops/workflow
+curl http://127.0.0.1:8080/ops/processes
 ```
 
 Static terminal:
@@ -311,10 +358,13 @@ python -m http.server 5173 --directory frontend
 # open http://127.0.0.1:5173
 ```
 
-Run a paper or live pipeline in another terminal so `/status`, `/portfolio`, and `/explain/latest` have runtime data.
-Use the cockpit `Ops` tab as the trader checklist before considering live mode.
+Run a paper or live pipeline in another terminal so `/status`, `/portfolio`,
+and `/explain/latest` have runtime data. The cockpit also subscribes to
+`/ws/market`, a direct Binance websocket passthrough for the live price tape,
+so the live chart is not waiting on DuckDB replay data. Use the `Ops` tab as the
+trader checklist before considering live mode.
 
-### 7. Run Reports
+### 8. Run Reports
 
 Paper report:
 
@@ -358,7 +408,7 @@ python -m src.reports.frontend_api_contract_smoke --live-api --format markdown
 The scheduled GitHub workflow is `.github/workflows/operational-automations.yml`.
 More detail is in [Operational Automations](docs/OPERATIONAL_AUTOMATIONS.md).
 
-### 8. Run MLOps Retraining
+### 9. Run MLOps Retraining
 
 The retraining path reads cached OHLCV from DuckDB, writes an experiment run
 ledger, trains a candidate, runs OOS, stress, label-quality, classifier

@@ -44,3 +44,20 @@ test("ops cockpit exposes trader production readiness", () => {
   assert.match(app, /Data Freshness/);
   assert.match(app, /PROD blocked/);
 });
+
+test("runbook cockpit exposes process controls and guided workflow", () => {
+  assert.match(app, /"Runbook"/);
+  assert.match(app, /\/ops\/workflow/);
+  assert.match(app, /\/ops\/processes/);
+  assert.match(app, /function RunbookView/);
+  assert.match(app, /requestProcessAction/);
+  assert.match(app, /Start \$\{name\}/);
+});
+
+test("live cockpit subscribes to direct market websocket chart", () => {
+  assert.match(app, /\/ws\/market\?symbol=/);
+  assert.match(app, /function LivePriceChart/);
+  assert.match(app, /marketTicks/);
+  assert.match(app, /Live Price Tape/);
+  assert.match(app, /latency_ms/);
+});

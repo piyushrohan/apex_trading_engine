@@ -22,8 +22,8 @@ venv/bin/pytest tests/ \
 #
 # Latest strict full-suite check:
 # venv/bin/pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=98
-# 323 passed
-# Total coverage: 98.06%
+# 337 passed
+# Total coverage: 98.12%
 ```
 
 Risk gate:
