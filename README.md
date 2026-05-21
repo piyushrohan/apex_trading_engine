@@ -98,6 +98,9 @@ make test-risk
   - `GET /metrics/paper`
   - `WS /ws/status`
 - Static frontend terminal in `frontend/` reads API status, explainability, portfolio, and metrics views.
+- Trader production readiness view exposes live blockers, paper gate status,
+  fill evidence, model readiness, runtime freshness, and data health through
+  `/ops/readiness` and the cockpit `Ops` tab.
 - Paper report summarizes paper equity snapshots, Sharpe, max drawdown, directional decisions, fills, and fill rate.
 - Hedge report aggregates selected strategies, score observations, average score, and hedge PnL.
 - Operational automation reports cover paper health, shadow lane sanity, model governance, experiment ledger audit, frontend/API contract smoke, and DuckDB freshness/integrity.
@@ -281,6 +284,7 @@ curl http://127.0.0.1:8080/status
 curl http://127.0.0.1:8080/explain/latest
 curl http://127.0.0.1:8080/portfolio
 curl http://127.0.0.1:8080/metrics/paper
+curl http://127.0.0.1:8080/ops/readiness
 ```
 
 Static terminal:
@@ -291,6 +295,7 @@ python -m http.server 5173 --directory frontend
 ```
 
 Run a paper or live pipeline in another terminal so `/status`, `/portfolio`, and `/explain/latest` have runtime data.
+Use the cockpit `Ops` tab as the trader checklist before considering live mode.
 
 ### 7. Run Reports
 

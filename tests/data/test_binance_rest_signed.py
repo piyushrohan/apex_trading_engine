@@ -240,6 +240,72 @@ async def test_public_market_helpers_handle_shapes_and_failures():
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_exchange_info_rules_validate_live_execution_constraints(monkeypatch):
+    client = BinanceRESTClient()
+    payload = {
+        "rateLimits": [{"rateLimitType": "ORDERS", "limit": 1200}],
+        "symbols": [
+            {
+                "symbol": "ETHUSDC",
+                "status": "TRADING",
+                "contractType": "PERPETUAL",
+                "marginAsset": "USDC",
+                "orderTypes": ["LIMIT", "MARKET"],
+                "timeInForce": ["GTC", "GTX"],
+                "filters": [
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                    {"filterType": "LOT_SIZE", "stepSize": "0.001"},
+                    {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(client, "_public_get", AsyncMock(return_value=payload))
+
+    rules = await client.fetch_symbol_rules("ETHUSDC")
+    validation = await client.validate_symbol_execution_rules("ETHUSDC")
+
+    assert rules["filters"]["PRICE_FILTER"]["tickSize"] == "0.01"
+    assert rules["rate_limits"][0]["rateLimitType"] == "ORDERS"
+    assert validation["ok"] is True
+    assert validation["reasons"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_exchange_info_rules_flag_missing_prod_constraints(monkeypatch):
+    client = BinanceRESTClient()
+    monkeypatch.setattr(
+        client,
+        "_public_get",
+        AsyncMock(
+            return_value={
+                "symbols": [
+                    {
+                        "symbol": "ETHUSDC",
+                        "status": "BREAK",
+                        "marginAsset": "BTC",
+                        "timeInForce": ["GTC"],
+                        "filters": [],
+                    }
+                ]
+            }
+        ),
+    )
+
+    validation = await client.validate_symbol_execution_rules("ETHUSDC")
+    missing = await client.fetch_symbol_rules("BTCUSDC")
+
+    assert validation["ok"] is False
+    assert "symbol_not_trading" in validation["reasons"]
+    assert "margin_asset_not_usdc" in validation["reasons"]
+    assert "post_only_gtx_unavailable" in validation["reasons"]
+    assert "missing_price_filter" in validation["reasons"]
+    assert missing["status"] == "MISSING"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_listen_key_success_paths_clear_cached_key(monkeypatch):
     session = ParamSession(
         [
