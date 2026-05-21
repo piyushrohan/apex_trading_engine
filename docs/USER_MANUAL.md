@@ -906,9 +906,21 @@ mlops:
   registry_dir: data_lake/models
   experiment_log_path: data_lake/mlops/experiments.jsonl
   min_training_rows: 120
+  min_supervised_rows: 120
   candidate_model_type: GBM
   label_return_threshold: 0.0005
+  label_horizon_bars: 3
+  label_cost_buffer_bps: 4.0
   feature_version: v1
+  quality:
+    min_history_days: 90
+    min_directional_ratio: 0.12
+    max_dominant_label_ratio: 0.80
+    max_near_threshold_ratio: 0.45
+    trade_probability_threshold: 0.55
+    min_trade_signal_coverage: 0.05
+    max_expected_calibration_error: 0.35
+    max_brier_score: 0.80
   walk_forward:
     enabled: true
     required: false
@@ -928,10 +940,28 @@ Effects:
   events.
 - `experiment_log_path` stores the append-only training ledger.
 - `min_training_rows` prevents under-sampled retraining.
+- `min_supervised_rows` prevents training after horizon labels drop too many
+  rows from the raw candle dataset.
 - `candidate_model_type` selects `GBM` or `PPO`.
 - `label_return_threshold` controls how future returns become SHORT/FLAT/LONG
   labels. Higher thresholds produce fewer directional labels.
+- `label_horizon_bars` controls how far forward the training label looks. Longer
+  horizons reduce one-bar noise but make labels slower.
+- `label_cost_buffer_bps` forces labels to clear estimated cost before becoming
+  LONG or SHORT. If the threshold is smaller than the cost buffer, the cost
+  buffer wins.
 - `feature_version` is written into model evidence.
+- `quality.min_history_days` blocks shadow promotion when the local training
+  window is too short for robust crypto regime evidence.
+- `quality.min_directional_ratio` and `quality.max_dominant_label_ratio` protect
+  against training on mostly FLAT or single-class targets.
+- `quality.max_near_threshold_ratio` flags labels that sit too close to the
+  decision threshold and could flip after noise, fees, or slippage.
+- `quality.trade_probability_threshold` and
+  `quality.min_trade_signal_coverage` make sure the candidate produces enough
+  confident directional signals to be useful.
+- `quality.max_expected_calibration_error` and `quality.max_brier_score` gate
+  models whose probabilities are too poorly calibrated on OOS labels.
 - `walk_forward.enabled=true` runs expanding-window validation after the normal
   OOS backtest.
 - `walk_forward.required=false` means weak walk-forward evidence is recorded but

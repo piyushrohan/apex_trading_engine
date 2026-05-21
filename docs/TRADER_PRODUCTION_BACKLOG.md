@@ -42,7 +42,7 @@ strong enough to justify live market exposure.
 | Champion/challenger discipline | Current PROD remains champion while SHADOW candidates compete forward-only. |
 | Regime-sliced walk-forward | Validation reports pass/fail by trend, mean reversion, volatility expansion, funding stress, and liquidity sweep regimes. |
 | Feature drift report | Compare live feature distributions with the training snapshot used by the active model. |
-| Label stability report | Show how many labels sit near decision thresholds and how sensitive they are to small price moves. |
+| Label stability report | Retrain now records near-threshold sensitivity and label balance; next step is exposing active-model drift in the cockpit. |
 | No-trade intelligence | Meta-controller should explain when the best decision is no trade because the market is not worth trading. |
 
 ## P1 Risk And Survival

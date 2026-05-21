@@ -108,22 +108,53 @@ class AutoRetrainPipeline:
             )
 
             dataset = self._build_supervised_dataset(raw)
+            min_supervised_rows = self.config.get("mlops", {}).get(
+                "min_supervised_rows", min_rows
+            )
+            if len(dataset) < min_supervised_rows:
+                logger.warning(
+                    "Skipping retrain: only %s supervised rows available, need %s",
+                    len(dataset),
+                    min_supervised_rows,
+                )
+                self.tracker.complete_run(
+                    run_id,
+                    "SKIPPED",
+                    metadata={
+                        "reason": "insufficient_supervised_data",
+                        "rows": len(dataset),
+                    },
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "insufficient_supervised_data",
+                    "run_id": run_id,
+                }
+            model_type = (
+                self.config.get("mlops", {}).get("candidate_model_type", "GBM").upper()
+            )
+            new_model_id = f"{model_type.lower()}_ethusdc_v{uuid.uuid4().hex[:8]}"
+            label_quality = self._label_quality_report(dataset)
+            self.tracker.log_step(
+                run_id,
+                "label_quality",
+                "PASSED" if label_quality["passed"] else "FAILED",
+                metrics=label_quality,
+                metadata={"model_id": new_model_id},
+            )
             split_idx = max(int(len(dataset) * 0.7), 1)
             train_df = dataset.iloc[:split_idx]
             oos_df = dataset.iloc[split_idx:]
             if oos_df.empty:
                 oos_df = dataset.tail(min(len(dataset), 10))
 
-            model_type = (
-                self.config.get("mlops", {}).get("candidate_model_type", "GBM").upper()
-            )
-            new_model_id = f"{model_type.lower()}_ethusdc_v{uuid.uuid4().hex[:8]}"
             logger.info(f"Training new candidate model: {new_model_id}")
 
             agent = self._build_agent(model_type)
             train_metrics = agent.train(
                 train_df[self._feature_columns()].to_numpy(),
                 train_df["label"].to_numpy(),
+                self._sample_weights(train_df),
             )
             self.tracker.log_step(
                 run_id,
@@ -174,6 +205,7 @@ class AutoRetrainPipeline:
             backtest.meta_controller = CandidateController(agent)
             pnl_series, trade_history = backtest.run(self._to_backtest_frame(oos_df))
             metrics = self.evaluator.evaluate_oos(pnl_series, trade_history)
+            classifier_quality = self._classifier_quality_report(agent, oos_df)
             if hasattr(self.evaluator, "evaluate_stress"):
                 stress_metrics = self.evaluator.evaluate_stress(
                     pnl_series, trade_history
@@ -182,8 +214,16 @@ class AutoRetrainPipeline:
                 stress_metrics = {"stress_passed": metrics.get("passed_safety", False)}
             walk_forward_metrics = self._walk_forward_validate(dataset, model_type)
             metrics["training"] = train_metrics
+            metrics["label_quality"] = label_quality
+            metrics["classifier_quality"] = classifier_quality
             metrics["stress"] = stress_metrics
             metrics["walk_forward"] = walk_forward_metrics
+            quality_gate = self._quality_gate(
+                data_metadata=data_metadata,
+                label_quality=label_quality,
+                classifier_quality=classifier_quality,
+            )
+            metrics["quality_gate"] = quality_gate
             self.registry.update_model_metrics(new_model_id, metrics)
             self.tracker.log_step(
                 run_id,
@@ -206,6 +246,13 @@ class AutoRetrainPipeline:
                 metrics=walk_forward_metrics,
                 metadata={"model_id": new_model_id},
             )
+            self.tracker.log_step(
+                run_id,
+                "model_quality_gate",
+                "PASSED" if quality_gate.get("passed") else "FAILED",
+                metrics=quality_gate,
+                metadata={"model_id": new_model_id},
+            )
             if hasattr(self.registry, "write_model_manifest"):
                 self.registry.write_model_manifest(
                     new_model_id,
@@ -219,6 +266,7 @@ class AutoRetrainPipeline:
             passed_all = bool(
                 metrics.get("passed_safety", False)
                 and stress_metrics.get("stress_passed", False)
+                and quality_gate.get("passed", False)
                 and (
                     not walk_forward_metrics.get("required", False)
                     or walk_forward_metrics.get("passed", False)
@@ -238,11 +286,16 @@ class AutoRetrainPipeline:
                 )
             else:
                 try:
+                    rejection_reason = (
+                        "model_quality_gate_failed"
+                        if not quality_gate.get("passed", False)
+                        else "offline_stress_or_walk_forward_gate_failed"
+                    )
                     self.registry.set_model_status(
                         new_model_id,
                         "REJECTED",
                         actor="auto_retrain",
-                        reason="offline_stress_or_walk_forward_gate_failed",
+                        reason=rejection_reason,
                     )
                 except TypeError:
                     self.registry.set_model_status(new_model_id, "REJECTED")
@@ -291,7 +344,12 @@ class AutoRetrainPipeline:
         data = df.sort_values("timestamp").copy()
         close = data["close"].astype(float)
         returns = close.pct_change().fillna(0.0)
-        future_returns = close.shift(-1).sub(close).div(close).fillna(0.0)
+        mlops_cfg = self.config.get("mlops", {})
+        horizon = max(int(mlops_cfg.get("label_horizon_bars", 1)), 1)
+        threshold = float(mlops_cfg.get("label_return_threshold", 0.0005))
+        cost_buffer = float(mlops_cfg.get("label_cost_buffer_bps", 0.0)) / 10000.0
+        label_threshold = max(threshold, cost_buffer)
+        future_returns = close.shift(-horizon).sub(close).div(close)
         vol = returns.rolling(10, min_periods=1).std().fillna(0.0)
         volume = data["volume"].astype(float)
         volume_z = (
@@ -305,7 +363,6 @@ class AutoRetrainPipeline:
             .sub(close.ewm(span=15, adjust=False).mean())
             .div(close)
         )
-        threshold = self.config.get("mlops", {}).get("label_return_threshold", 0.0005)
 
         features = pd.DataFrame(
             {
@@ -324,8 +381,11 @@ class AutoRetrainPipeline:
                 "feature_9": trend.fillna(0.0),
             }
         )
+        features["future_return"] = future_returns
+        features["label_threshold"] = label_threshold
+        features["label_horizon_bars"] = horizon
         features["label"] = np.select(
-            [future_returns < -threshold, future_returns > threshold],
+            [future_returns < -label_threshold, future_returns > label_threshold],
             [0, 2],
             default=1,
         )
@@ -334,6 +394,188 @@ class AutoRetrainPipeline:
     def _to_backtest_frame(self, dataset: pd.DataFrame) -> pd.DataFrame:
         frame = dataset[["timestamp", "close", "regime_str", *self._feature_columns()]]
         return frame.set_index("timestamp")
+
+    def _sample_weights(self, dataset: pd.DataFrame) -> np.ndarray:
+        """Weight rare directional labels higher without changing labels."""
+        cfg = self.config.get("mlops", {}).get("quality", {})
+        if not cfg.get("class_balance_weights", True):
+            return np.ones(len(dataset), dtype=float)
+
+        labels = dataset["label"].astype(int)
+        counts = labels.value_counts().to_dict()
+        total = max(len(labels), 1)
+        classes = max(len(counts), 1)
+        weights = labels.map(
+            lambda label: total / (classes * max(int(counts.get(int(label), 0)), 1))
+        ).astype(float)
+        cap = float(cfg.get("max_sample_weight", 5.0))
+        return weights.clip(lower=0.1, upper=cap).to_numpy()
+
+    def _label_quality_report(self, dataset: pd.DataFrame) -> Dict[str, Any]:
+        """Describe whether labels are balanced, tradeable, and stable."""
+        cfg = self.config.get("mlops", {}).get("quality", {})
+        labels = dataset["label"].astype(int)
+        total = int(len(labels))
+        counts = {
+            str(label): int(count) for label, count in labels.value_counts().items()
+        }
+        if total == 0:
+            return {
+                "passed": False,
+                "blockers": ["empty_supervised_dataset"],
+                "rows": 0,
+                "label_counts": {},
+            }
+
+        directional = int((labels != 1).sum())
+        ratios = labels.value_counts(normalize=True).to_dict()
+        dominant_label_ratio = float(max(ratios.values())) if ratios else 1.0
+        directional_ratio = float(directional / total)
+        future_abs = dataset["future_return"].astype(float).abs()
+        thresholds = dataset["label_threshold"].astype(float)
+        band_fraction = float(cfg.get("near_threshold_band_fraction", 0.20))
+        near_threshold = future_abs.sub(thresholds).abs() <= thresholds * band_fraction
+        probabilities = np.array(list(ratios.values()), dtype=float)
+        entropy = 0.0
+        if len(probabilities) > 1:
+            entropy = float(
+                -np.sum(probabilities * np.log(probabilities))
+                / np.log(min(3, len(probabilities)))
+            )
+
+        blockers = []
+        min_directional = float(cfg.get("min_directional_ratio", 0.0))
+        max_dominant = float(cfg.get("max_dominant_label_ratio", 1.0))
+        max_near = float(cfg.get("max_near_threshold_ratio", 1.0))
+        if directional_ratio < min_directional:
+            blockers.append("directional_labels_too_sparse")
+        if dominant_label_ratio > max_dominant:
+            blockers.append("dominant_label_too_high")
+        near_ratio = float(near_threshold.mean())
+        if near_ratio > max_near:
+            blockers.append("labels_too_close_to_threshold")
+
+        return {
+            "passed": not blockers,
+            "blockers": blockers,
+            "rows": total,
+            "label_counts": counts,
+            "directional_ratio": directional_ratio,
+            "dominant_label_ratio": dominant_label_ratio,
+            "near_threshold_ratio": near_ratio,
+            "label_entropy": entropy,
+            "threshold": float(thresholds.iloc[0]),
+            "horizon_bars": int(dataset["label_horizon_bars"].iloc[0]),
+        }
+
+    def _classifier_quality_report(
+        self, agent, dataset: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """Evaluate probability calibration on the OOS label set."""
+        if dataset.empty:
+            return {
+                "passed": False,
+                "blockers": ["empty_oos_dataset"],
+                "samples": 0,
+            }
+
+        probs = self._predict_probabilities(agent, dataset[self._feature_columns()])
+        labels = dataset["label"].astype(int).to_numpy()
+        predicted = probs.argmax(axis=1)
+        confidence = probs.max(axis=1)
+        accuracy = predicted == labels
+        one_hot = np.eye(probs.shape[1])[labels]
+        brier = float(np.mean(np.sum((probs - one_hot) ** 2, axis=1)))
+        ece = self._expected_calibration_error(confidence, accuracy)
+        threshold = float(
+            self.config.get("mlops", {})
+            .get("quality", {})
+            .get("trade_probability_threshold", 0.55)
+        )
+        directional = predicted != 1
+        trade_coverage = float(((confidence >= threshold) & directional).mean())
+
+        cfg = self.config.get("mlops", {}).get("quality", {})
+        blockers = []
+        if brier > float(cfg.get("max_brier_score", 1.0)):
+            blockers.append("brier_score_too_high")
+        if ece > float(cfg.get("max_expected_calibration_error", 1.0)):
+            blockers.append("calibration_error_too_high")
+        if trade_coverage < float(cfg.get("min_trade_signal_coverage", 0.0)):
+            blockers.append("trade_signal_coverage_too_low")
+
+        return {
+            "passed": not blockers,
+            "blockers": blockers,
+            "samples": int(len(labels)),
+            "accuracy": float(accuracy.mean()),
+            "brier_score": brier,
+            "expected_calibration_error": ece,
+            "avg_confidence": float(confidence.mean()),
+            "trade_signal_coverage": trade_coverage,
+            "trade_probability_threshold": threshold,
+            "prediction_counts": {
+                str(label): int((predicted == label).sum())
+                for label in range(probs.shape[1])
+            },
+        }
+
+    @staticmethod
+    def _predict_probabilities(agent, features: pd.DataFrame) -> np.ndarray:
+        x_arr = features.to_numpy(dtype=float)
+        if hasattr(agent, "model") and hasattr(agent.model, "predict_proba"):
+            return np.asarray(agent.model.predict_proba(x_arr), dtype=float)
+        predictions = [
+            agent.act(row.tolist())[2].get("action_probs")
+            for _, row in features.iterrows()
+        ]
+        return np.asarray(predictions, dtype=float)
+
+    @staticmethod
+    def _expected_calibration_error(
+        confidence: np.ndarray, correct: np.ndarray, bins: int = 10
+    ) -> float:
+        edges = np.linspace(0.0, 1.0, bins + 1)
+        ece = 0.0
+        for left, right in zip(edges[:-1], edges[1:]):
+            in_bin = (confidence > left) & (confidence <= right)
+            if not in_bin.any():
+                continue
+            bin_weight = in_bin.mean()
+            bin_accuracy = correct[in_bin].mean()
+            bin_confidence = confidence[in_bin].mean()
+            ece += float(bin_weight * abs(bin_accuracy - bin_confidence))
+        return float(ece)
+
+    def _quality_gate(
+        self,
+        *,
+        data_metadata: Dict[str, Any],
+        label_quality: Dict[str, Any],
+        classifier_quality: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Aggregate data, label, and probability evidence into promotion blockers."""
+        cfg = self.config.get("mlops", {}).get("quality", {})
+        blockers = []
+        min_history_days = float(cfg.get("min_history_days", 0.0))
+        history_days = float(data_metadata.get("history_days", 0.0))
+        if history_days < min_history_days:
+            blockers.append("history_window_too_short")
+        blockers.extend(
+            f"label:{blocker}" for blocker in label_quality.get("blockers", [])
+        )
+        blockers.extend(
+            f"classifier:{blocker}"
+            for blocker in classifier_quality.get("blockers", [])
+        )
+        return {
+            "passed": not blockers,
+            "blockers": blockers,
+            "history_days": history_days,
+            "min_history_days": min_history_days,
+            "label_passed": bool(label_quality.get("passed", False)),
+            "classifier_passed": bool(classifier_quality.get("passed", False)),
+        }
 
     def _walk_forward_validate(
         self, dataset: pd.DataFrame, model_type: str
@@ -438,6 +680,11 @@ class AutoRetrainPipeline:
             .to_dict("records")
         )
         timestamps = pd.to_datetime(checksum_frame["timestamp"])
+        history_days = 0.0
+        if len(timestamps) > 1:
+            history_days = float(
+                (timestamps.max() - timestamps.min()).total_seconds() / 86400.0
+            )
         gaps = 0
         if len(timestamps) > 2:
             expected_delta = timestamps.diff().dropna().mode()
@@ -449,6 +696,7 @@ class AutoRetrainPipeline:
             "rows": int(len(df)),
             "start": pd.to_datetime(df["timestamp"].min()).isoformat(),
             "end": pd.to_datetime(df["timestamp"].max()).isoformat(),
+            "history_days": history_days,
             "gaps": gaps,
         }
 

@@ -135,7 +135,9 @@ apex_trading_engine/
 
 For a full operator guide covering architecture, startup, frontend/backend use,
 training, configuration, model logic, and live safety, read
-[APEX User Manual](docs/USER_MANUAL.md).
+[APEX User Manual](docs/USER_MANUAL.md). For the current model-quality gates
+around labels, calibration, and promotion blockers, see
+[Model Quality Upgrade](docs/MODEL_QUALITY_UPGRADE.md).
 
 ### 1. Create The Environment
 
@@ -343,7 +345,11 @@ More detail is in [Operational Automations](docs/OPERATIONAL_AUTOMATIONS.md).
 
 ### 8. Run MLOps Retraining
 
-The retraining path reads cached OHLCV from DuckDB, writes an experiment run ledger, trains a candidate, runs OOS and stress gates, writes an immutable manifest, and promotes only safe candidates to the MLOps shadow lane. Bootstrap data first through ingestion/paper runs, then execute:
+The retraining path reads cached OHLCV from DuckDB, writes an experiment run
+ledger, trains a candidate, runs OOS, stress, label-quality, classifier
+calibration, and model-quality gates, writes an immutable manifest, and promotes
+only safe candidates to the MLOps shadow lane. Bootstrap data first through
+ingestion/paper runs, then execute:
 
 ```bash
 python -m src.mlops.auto_retrain
@@ -359,6 +365,14 @@ Experiment history is appended to:
 
 ```text
 data_lake/mlops/experiments.jsonl
+```
+
+Inspect quality evidence for a candidate:
+
+```bash
+jq '.models["<model_id>"].metrics.quality_gate' data_lake/models/registry.json
+jq '.models["<model_id>"].metrics.label_quality' data_lake/models/registry.json
+jq '.models["<model_id>"].metrics.classifier_quality' data_lake/models/registry.json
 ```
 
 Live mode is blocked unless `active_prod` is a `PROD` registry model with a saved artifact, manifest, git hash, and data snapshot id. See [Model Governance And Retraining Discipline](docs/MODEL_GOVERNANCE.md) for the full train -> validate -> backtest -> stress -> shadow -> approve -> prod workflow.
