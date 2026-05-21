@@ -95,6 +95,23 @@
     return candidates.length ? candidates[candidates.length - 1] : null;
   }
 
+  function processTone(process = {}) {
+    if (process.running) return "ok";
+    if (process.danger_level === "critical") return "danger";
+    if (process.returncode && process.returncode !== 0) return "warn";
+    return "neutral";
+  }
+
+  function groupProcesses(processes = {}) {
+    return Object.keys(processes).reduce((groups, name) => {
+      const process = processes[name] || {};
+      const category = process.category || "runtime";
+      groups[category] = groups[category] || [];
+      groups[category].push({ name, ...process });
+      return groups;
+    }, {});
+  }
+
   async function getJson(url, fallback = null) {
     const response = await fetch(url);
     if (!response.ok) return fallback;
@@ -300,13 +317,17 @@
       sendCommand(command, extra);
     }
 
-    function requestProcessAction(processName, action) {
+    function requestProcessAction(processName, action, process = {}) {
+      const extra = { process: processName };
+      if (processName === "live" && ["start", "restart"].includes(action)) {
+        extra.confirm_phrase = "START LIVE";
+      }
       setPendingCommand({
         kind: "process",
         processName,
         command: action,
-        extra: { process: processName },
-        label: `${action === "start" ? "Start" : "Stop"} ${processName}`,
+        extra,
+        label: `${action === "restart" ? "Restart" : action === "start" ? "Start" : "Stop"} ${process.label || processName}`,
       });
     }
 
@@ -1038,16 +1059,29 @@
   function RunbookView({ state, requestProcessAction }) {
     const workflow = state.workflow || {};
     const processes = state.processes?.processes || workflow.processes || {};
+    const grouped = groupProcesses(processes);
     const steps = workflow.steps || [];
+    const quickActions = [
+      ["paper", "start"],
+      ["training", "start"],
+      ["model_governance", "start"],
+      ["paper_health", "start"],
+      ["shadow_sanity", "start"],
+      ["data_freshness", "start"],
+      ["frontend_contract", "start"],
+      ["live", "start"],
+    ].filter(([name]) => processes[name]);
     return h(
       "section",
       { className: "stack" },
       h(
         "div",
         { className: "layout one-one" },
-        h(Panel, { title: "Guided Startup" },
+        h(Panel, { title: "One Command Runtime" },
           h(KpiGrid, {
             items: [
+              ["Start", workflow.start_command || "make start"],
+              ["Frontend", workflow.frontend?.url || workflow.frontend_url || "-"],
               ["Mode", workflow.operator_mode || "-"],
               ["Symbol", workflow.symbol || "-"],
               ["API Port", workflow.api?.port ?? "-"],
@@ -1058,40 +1092,45 @@
           }),
           h(Table, {
             rows: steps,
-            columns: ["id", "label", "status", "model_id", "action"],
+            columns: ["id", "label", "status", "action", "model_id", "blockers"],
           })
         ),
-        h(Panel, { title: "Local Process Controls", accent: "warn" },
+        h(Panel, { title: "Workflow Actions", accent: "warn" },
           h(
             "div",
-            { className: "process-grid" },
-            ...Object.keys(processes).map((name) => {
+            { className: "quick-grid" },
+            ...quickActions.map(([name, action]) => {
               const proc = processes[name] || {};
-              return h(
-                "div",
-                { className: "process-card", key: name },
-                h("div", { className: "process-title" }, name),
-                h(StatusPill, {
-                  label: proc.running ? `running pid ${proc.pid}` : "stopped",
-                  tone: proc.running ? "ok" : "neutral",
-                }),
-                h("p", { className: "muted" }, proc.description || "-"),
-                h("div", { className: "muted" }, proc.log_path || "-"),
-                h(
-                  "div",
-                  { className: "inline-controls" },
-                  h("button", {
-                    disabled: proc.running,
-                    onClick: () => requestProcessAction(name, "start"),
-                  }, `Start ${name}`),
-                  h("button", {
-                    disabled: !proc.running,
-                    className: "danger-button",
-                    onClick: () => requestProcessAction(name, "stop"),
-                  }, `Stop ${name}`)
-                )
-              );
+              const disabled = proc.running && action === "start";
+              return h("button", {
+                key: `${name}-${action}`,
+                className: proc.danger_level === "critical" ? "danger-button" : "",
+                disabled,
+                onClick: () => requestProcessAction(name, action, proc),
+              }, proc.label || name);
             })
+          )
+        )
+      ),
+      h(
+        Panel,
+        { title: "Local Control Center", accent: "warn" },
+        ...Object.keys(grouped).sort().map((category) =>
+          h(
+            "section",
+            { className: "process-section", key: category },
+            h("div", { className: "process-section-title" }, category),
+            h(
+              "div",
+              { className: "process-grid" },
+              ...grouped[category].map((proc) =>
+                h(ProcessCard, {
+                  key: proc.name,
+                  process: proc,
+                  requestProcessAction,
+                })
+              )
+            )
           )
         )
       ),
@@ -1103,6 +1142,69 @@
             h("li", { key: idx }, item)
           )
         )
+      )
+    );
+  }
+
+  function ProcessCard({ process, requestProcessAction }) {
+    const name = process.name;
+    const command = (process.command || []).join(" ");
+    const runningLabel = process.running
+      ? `running pid ${process.pid}`
+      : process.returncode === null || process.returncode === undefined
+        ? "stopped"
+        : `exited ${process.returncode}`;
+    const startDisabled = Boolean(process.running);
+    const stopDisabled = !process.running;
+    return h(
+      "div",
+      { className: `process-card process-${process.danger_level || "normal"}` },
+      h(
+        "div",
+        { className: "process-card-head" },
+        h("div", null,
+          h("div", { className: "process-title" }, process.label || name),
+          h("div", { className: "muted" }, name)
+        ),
+        h(StatusPill, { label: runningLabel, tone: processTone(process) })
+      ),
+      h(
+        "div",
+        { className: "pill-row" },
+        h(StatusPill, { label: process.category || "runtime", tone: "neutral" }),
+        h(StatusPill, {
+          label: process.long_running ? "loop" : "job",
+          tone: process.long_running ? "ok" : "neutral",
+        }),
+        h(StatusPill, {
+          label: process.danger_level || "normal",
+          tone: process.danger_level === "critical" ? "danger" : "neutral",
+        })
+      ),
+      h("p", { className: "muted" }, process.description || "-"),
+      process.operator_note
+        ? h("p", { className: "muted" }, process.operator_note)
+        : null,
+      h("div", { className: "muted mono-line" }, command || process.module || "-"),
+      h("div", { className: "muted mono-line" }, process.log_path || "-"),
+      process.last_log_lines?.length
+        ? h("pre", { className: "mini-log" }, process.last_log_lines.join("\n"))
+        : null,
+      h(
+        "div",
+        { className: "inline-controls" },
+        h("button", {
+          disabled: startDisabled,
+          onClick: () => requestProcessAction(name, "start", process),
+        }, "Start"),
+        h("button", {
+          onClick: () => requestProcessAction(name, "restart", process),
+        }, "Restart"),
+        h("button", {
+          disabled: stopDisabled,
+          className: "danger-button",
+          onClick: () => requestProcessAction(name, "stop", process),
+        }, "Stop")
       )
     );
   }
@@ -1201,7 +1303,9 @@
         h(
           "p",
           { className: "muted" },
-          "This action will be written to the operator ledger and consumed by the runtime loop."
+          pendingCommand.extra?.confirm_phrase
+            ? `Confirmation phrase: ${pendingCommand.extra.confirm_phrase}`
+            : "This action will be written to the operator ledger."
         ),
         h(
           "pre",

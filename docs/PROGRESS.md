@@ -196,7 +196,8 @@ venv/bin/pytest -q
 | Feature drift and label stability reports | DONE | Retrain records label stability, classifier calibration, and training feature references; `/models/drift` and `/ops/readiness` expose active-model drift |
 | Separate kill-switch lanes | DONE | Manual, model, data, execution, and account-sync lanes are normalized, persisted, surfaced in status/readiness, and controllable from the cockpit |
 | Chart overlays and replay mode | DONE | Frontend history view adds decision replay chart, probability history, fill markers, and order-fill timeline from lifecycle telemetry |
-| One-command cockpit and live tape | DONE | `src.ops.cockpit`, `/ops/workflow`, `/ops/processes`, browser Runbook controls, and direct `/ws/market` live chart are implemented |
+| One-command cockpit and live tape | DONE | `make start`, `src.ops.cockpit`, `/ops/workflow`, `/ops/processes`, browser Runbook controls, and direct `/ws/market` live chart are implemented |
+| Full frontend runtime control catalog | DONE | Runbook can start/stop/restart paper, live, shadow, training, governance, health, freshness, audit, contract, and report jobs from the allow-listed process manager |
 | Coverage expansion | DONE | Strict full-suite coverage now passes `--cov-fail-under=98` at 98.12% |
 
 ---
@@ -216,3 +217,4 @@ venv/bin/pytest -q
 | 2026-05-21 | **Model quality upgrade** — added fee-adjusted horizon labels, label stability diagnostics, probability calibration diagnostics, and quality gates for shadow promotion |
 | 2026-05-21 | **Trader hardening completion** — added order lifecycle telemetry, feature drift API/readiness checks, lane-specific kill switches, replay overlays, frontend contract updates, and 98.12% strict coverage |
 | 2026-05-21 | **Operator cockpit simplification** — added `python -m src.ops.cockpit`, browser Runbook process controls, `/ops/workflow`, `/ops/processes`, direct `/ws/market` price streaming, and lower-latency defaults |
+| 2026-05-21 | **Frontend control center expansion** — added `make start`, frontend-first cockpit startup, guarded live process control, report/evaluation job controls, restart actions, and process log snippets in the Runbook |

@@ -509,32 +509,42 @@ def ops_workflow():
     readiness = _production_readiness(registry)
     active_shadow = registry.registry_data.get("active_shadow")
     active_prod = registry.registry_data.get("active_prod")
-    paper_running = processes["paper"]["running"]
-    training_running = processes["training"]["running"]
+    paper_running = processes.get("paper", {}).get("running", False)
+    live_running = processes.get("live", {}).get("running", False)
+    training_running = processes.get("training", {}).get("running", False)
+    governance_returncode = processes.get("model_governance", {}).get("returncode")
     steps = [
         {
             "id": "cockpit",
             "label": "Open cockpit",
             "status": "ready",
-            "command": ("python -m src.ops.cockpit " "--paper"),
+            "command": "make start",
+            "action": None,
         },
         {
             "id": "paper",
             "label": "Run paper trading",
             "status": "running" if paper_running else "idle",
-            "action": "start-paper",
+            "action": "paper",
         },
         {
             "id": "train",
             "label": "Train or retrain model",
             "status": "running" if training_running else "idle",
-            "action": "start-training",
+            "action": "training",
+        },
+        {
+            "id": "evaluate",
+            "label": "Evaluate governance and paper evidence",
+            "status": "complete" if governance_returncode == 0 else "idle",
+            "action": "model_governance",
         },
         {
             "id": "shadow",
             "label": "Collect shadow evidence",
             "status": "ready" if active_shadow else "blocked",
             "model_id": active_shadow,
+            "action": "shadow",
         },
         {
             "id": "prod",
@@ -543,21 +553,38 @@ def ops_workflow():
             "model_id": active_prod,
             "blockers": readiness.get("blockers", []),
         },
+        {
+            "id": "live",
+            "label": "Start live trading only after gates clear",
+            "status": "running" if live_running else "blocked",
+            "action": "live",
+            "blockers": [] if readiness.get("ready") else readiness.get("blockers", []),
+        },
     ]
+    api_host = os.getenv("APEX_API_HOST", "127.0.0.1")
+    api_port = int(os.getenv("APEX_API_PORT", "8080"))
+    frontend_port = int(os.getenv("APEX_FRONTEND_PORT", "5173"))
+    frontend_url = (
+        f"http://{api_host}:{frontend_port}/?api=http://{api_host}:{api_port}"
+    )
     return {
         "title": "APEX Guided Operator Workflow",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "start_command": "make start",
+        "frontend_url": frontend_url,
         "operator_mode": runtime.get("operator_mode"),
         "symbol": runtime.get("symbol")
         or config.get("data", {}).get("target_symbol", "ETHUSDC"),
         "api": {
-            "host": os.getenv("APEX_API_HOST", "127.0.0.1"),
-            "port": int(os.getenv("APEX_API_PORT", "8080")),
+            "host": api_host,
+            "port": api_port,
             "status_ws_interval_sec": float(
                 _api_cfg(config).get("status_ws_interval_sec", 0.5)
             ),
         },
+        "frontend": {"port": frontend_port, "url": frontend_url},
         "processes": processes,
+        "capabilities": PROCESS_MANAGER.capabilities(),
         "registry": {
             "active_prod": active_prod,
             "active_shadow": active_shadow,
@@ -566,8 +593,13 @@ def ops_workflow():
         },
         "steps": steps,
         "recommended_next": [
-            "Start paper from the cockpit if it is idle.",
+            "Run make start once, then operate from this browser cockpit.",
+            "Start paper from the control center if it is idle.",
             "Train only after DuckDB has enough OHLCV history.",
+            (
+                "Run model governance, paper health, shadow sanity, and data "
+                "checks after training."
+            ),
             "Keep candidate models in shadow until promotion gates pass.",
             "Do not request live mode until PROD readiness and paper gate clear.",
         ],
@@ -579,6 +611,7 @@ def ops_processes():
     """Local allow-listed paper/training subprocess status."""
     return {
         "processes": PROCESS_MANAGER.list_processes(),
+        "capabilities": PROCESS_MANAGER.capabilities(),
         "allowed": sorted(PROCESS_MANAGER.SPECS),
     }
 
@@ -592,12 +625,26 @@ def ops_process_action(process_name: str, payload: Optional[Dict[str, Any]] = No
     action = body.get("action")
     dry_run = bool(body.get("dry_run", False))
     try:
+        spec = PROCESS_MANAGER.SPECS[process_name]
+        if (
+            process_name == "live"
+            and action in {"start", "restart"}
+            and body.get("confirm_phrase") != "START LIVE"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="confirm_phrase=START LIVE is required for live trading",
+            )
         if action == "start":
             result = PROCESS_MANAGER.start(process_name, dry_run=dry_run)
         elif action == "stop":
             result = PROCESS_MANAGER.stop(process_name, dry_run=dry_run)
+        elif action == "restart":
+            result = PROCESS_MANAGER.restart(process_name, dry_run=dry_run)
         else:
-            raise HTTPException(status_code=400, detail="action must be start/stop")
+            raise HTTPException(
+                status_code=400, detail="action must be start/stop/restart"
+            )
     except KeyError:
         raise HTTPException(status_code=404, detail="unknown process") from None
 
@@ -605,7 +652,13 @@ def ops_process_action(process_name: str, payload: Optional[Dict[str, Any]] = No
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "command": f"process-{action}",
         "reason": body.get("reason", ""),
-        "payload": {"process": process_name, "dry_run": dry_run},
+        "payload": {
+            "process": process_name,
+            "label": spec.label or process_name,
+            "category": spec.category,
+            "danger_level": spec.danger_level,
+            "dry_run": dry_run,
+        },
         "state_after": result,
     }
     _append_audit(event)

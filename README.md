@@ -264,12 +264,13 @@ open htmlcov/index.html
 
 ### 4. One-Command Operator Cockpit
 
-The easiest local workflow starts the API and static terminal together. Add
-`--paper` when you want the supervised paper loop running immediately:
+The default local workflow starts the browser terminal first, then starts the
+API behind it. From there, use the `Runbook` tab to start and stop the
+allow-listed runtime jobs.
 
 ```bash
 source venv/bin/activate
-python -m src.ops.cockpit --paper
+make start
 ```
 
 Open:
@@ -281,19 +282,26 @@ http://127.0.0.1:5173/?api=http://127.0.0.1:8080
 Useful variants:
 
 ```bash
-# API + frontend only; start paper/training later from the Runbook tab
+# frontend + API only; start paper/training/evaluation/live later in Runbook
 python -m src.ops.cockpit
 
 # show the launch plan without starting child processes
-python -m src.ops.cockpit --once --paper --train
+python -m src.ops.cockpit --once --paper --train --live
 
 # start retraining beside the cockpit after enough data exists
 python -m src.ops.cockpit --train
+
+# start the safe paper loop immediately
+python -m src.ops.cockpit --paper
 ```
 
-The frontend `Runbook` tab shows the guided paper -> train -> shadow -> PROD
-workflow and can start/stop the allow-listed local `paper` and `training`
-processes after the API is up.
+The frontend `Runbook` tab is the local control center. It can start, stop, and
+restart supervised jobs for paper trading, governed retraining, model
+governance evaluation, paper/shadow health checks, data freshness checks,
+ledger audit, frontend/API contract smoke, shadow observation, reports, and
+guarded live trading. Starting `live` requires an explicit `START LIVE`
+confirmation payload and the live pipeline still enforces credentials, config,
+paper evidence, risk, and production-model readiness.
 
 ### 5. Run Paper Mode Manually
 

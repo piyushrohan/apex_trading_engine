@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-frontend", action="store_true")
     parser.add_argument("--paper", action="store_true")
     parser.add_argument("--train", action="store_true")
+    parser.add_argument("--live", action="store_true")
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--once", action="store_true", help="Print plan and exit.")
     return parser
@@ -90,16 +91,8 @@ def launch_from_args(args: argparse.Namespace) -> list[LaunchedProcess]:
     api_env = {
         "APEX_API_HOST": args.host,
         "APEX_API_PORT": str(args.api_port),
+        "APEX_FRONTEND_PORT": str(args.frontend_port),
     }
-    processes.append(
-        _launch(
-            name="api",
-            args=[python, "-m", "src.api.server"],
-            log_dir=log_dir,
-            log_name="cockpit_api.log",
-            env=api_env,
-        )
-    )
     if not args.no_frontend:
         processes.append(
             _launch(
@@ -114,8 +107,18 @@ def launch_from_args(args: argparse.Namespace) -> list[LaunchedProcess]:
                 ],
                 log_dir=log_dir,
                 log_name="cockpit_frontend.log",
+                env={"APEX_FRONTEND_PORT": str(args.frontend_port)},
             )
         )
+    processes.append(
+        _launch(
+            name="api",
+            args=[python, "-m", "src.api.server"],
+            log_dir=log_dir,
+            log_name="cockpit_api.log",
+            env=api_env,
+        )
+    )
     if args.paper:
         processes.append(
             _launch(
@@ -135,6 +138,16 @@ def launch_from_args(args: argparse.Namespace) -> list[LaunchedProcess]:
                 log_name="cockpit_training.log",
             )
         )
+    if args.live:
+        processes.append(
+            _launch(
+                name="live",
+                args=[python, "-m", "src.pipelines.live_trade"],
+                log_dir=log_dir,
+                log_name="cockpit_live.log",
+                env={"APEX_EXECUTION_MODE": "live"},
+            )
+        )
     return processes
 
 
@@ -151,10 +164,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Frontend: {url}")
         print(f"Paper: {'on' if args.paper else 'off'}")
         print(f"Training: {'on' if args.train else 'off'}")
+        print(f"Live: {'on' if args.live else 'off'}")
         return 0
 
     processes = launch_from_args(args)
     print("APEX cockpit is starting.")
+    if not args.no_frontend:
+        print("Frontend starts first; use the browser control center after it loads.")
     print(f"API: http://{args.host}:{args.api_port}")
     if not args.no_frontend:
         print(f"Frontend: {url}")
