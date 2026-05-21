@@ -15,7 +15,13 @@ from src.data.market_state import MarketStateService
 from src.execution.adapters.base import OrderRequest
 from src.execution.factory import create_execution_adapter, get_operator_mode
 from src.execution.grid_adapter import MakerGridAdapter
+from src.execution.kill_switch import (
+    active_kill_switch_lanes,
+    kill_switch_active,
+    normalize_kill_switch_lanes,
+)
 from src.execution.live_gate import check_api_credentials, validate_live_startup
+from src.execution.order_lifecycle import OrderLifecycleRecorder
 from src.execution.portfolio import PortfolioService
 from src.execution.position_sync import AccountSynchronizer
 from src.execution.risk_engine import RiskEngine
@@ -65,9 +71,20 @@ class TradingPipeline:
             symbol=self.symbol,
             initial_equity=initial_equity,
         )
+        self.order_lifecycle = OrderLifecycleRecorder(
+            path=config.get("execution", {}).get(
+                "order_lifecycle_path", "data_lake/order_lifecycle.jsonl"
+            ),
+            cache=self.ingestion.cache,
+            execution_mode=self.operator_mode,
+            book_id=self.primary_book.book_id,
+        )
 
         self.execution_adapter = create_execution_adapter(
-            config, self.rest_client, book_id="primary"
+            config,
+            self.rest_client,
+            book_id="primary",
+            lifecycle_recorder=self.order_lifecycle,
         )
         self.shadow_runner = ShadowLaneRunner(
             config=config,
@@ -75,6 +92,7 @@ class TradingPipeline:
             portfolio=self.portfolio,
             symbol=self.symbol,
             operator_mode=self.operator_mode,
+            cache=self.ingestion.cache,
         )
         self.account_sync: Optional[AccountSynchronizer] = None
         if self.operator_mode == "live":
@@ -357,7 +375,8 @@ class TradingPipeline:
             if name == "kill-switch":
                 self.risk_engine.is_kill_switch_active = True
             elif name == "clear-kill-switch":
-                self.risk_engine.is_kill_switch_active = False
+                lanes = normalize_kill_switch_lanes(controls.get("kill_switch_lanes"))
+                self.risk_engine.is_kill_switch_active = kill_switch_active(lanes)
             elif name == "flatten":
                 if mark_price and mark_price > 0:
                     await self._handle_kill_switch(mark_price)
@@ -371,8 +390,13 @@ class TradingPipeline:
                     payload.get("mode"),
                 )
 
-        if controls.get("kill_switch_requested"):
+        lanes = normalize_kill_switch_lanes(controls.get("kill_switch_lanes"))
+        if controls.get("kill_switch_requested") or kill_switch_active(lanes):
             self.risk_engine.is_kill_switch_active = True
+            logger.warning(
+                "Kill switch lanes active: %s",
+                ",".join(active_kill_switch_lanes(lanes)) or "legacy",
+            )
         if controls.get("paused"):
             logger.warning("Operator pause active - skipping trading tick.")
             return True
@@ -547,6 +571,9 @@ class TradingPipeline:
             regime=regime,
             mark_price=mark_price,
             kill_switch_active=self.risk_engine.is_kill_switch_active,
+            kill_switch_lanes=normalize_kill_switch_lanes(
+                self._load_operator_controls().get("kill_switch_lanes")
+            ),
             model_id=book.model_id,
             last_explanation=last_explanation,
             sizing_calibration=getattr(self, "_last_sizing_calibration", None),

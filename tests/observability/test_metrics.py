@@ -89,3 +89,28 @@ def test_metrics_prometheus_branch_and_port_conflict(monkeypatch):
     conflicted.start_server(port=9912)
 
     assert conflicted._server_started is True
+
+
+@pytest.mark.unit
+def test_metrics_noop_fallback_branch(monkeypatch):
+    import src.observability.metrics as metrics_module
+
+    started = []
+    monkeypatch.setattr(metrics_module, "Gauge", None)
+    monkeypatch.setattr(metrics_module, "Histogram", None)
+    monkeypatch.setattr(metrics_module, "CollectorRegistry", None)
+    monkeypatch.setattr(
+        metrics_module,
+        "start_http_server",
+        lambda port, **kwargs: started.append((port, kwargs)),
+    )
+
+    metrics = ApexMetrics()
+    metrics.set_pnl("paper", "primary", "primary", 1.0)
+    metrics.set_ws_health("paper", True)
+    metrics.set_paper_fill_rate("paper", "primary", 0.5)
+    assert metrics.time_inference("paper", lambda: "ok") == "ok"
+
+    metrics.start_server(port=9913)
+
+    assert started == [(9913, {})]

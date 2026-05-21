@@ -2,6 +2,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -575,6 +576,124 @@ def test_frontend_api_contract_smoke_flags_missing_controls(tmp_path):
 
 
 @pytest.mark.unit
+def test_frontend_api_contract_smoke_live_helpers_and_cli_failure(
+    tmp_path, monkeypatch, capsys
+):
+    assert frontend_api_contract_smoke._api_routes(tmp_path / "missing.py") == {}
+    assert frontend_api_contract_smoke._route_present(
+        {"post": {"/control/{command}"}}, "post", "/control/kill-switch"
+    )
+    assert (
+        frontend_api_contract_smoke._live_get_json("ftp://host", "/status", 1)["error"]
+        == "unsupported_url_scheme"
+    )
+
+    class ErrorConnection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, *args, **kwargs):
+            raise OSError("connection refused")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        frontend_api_contract_smoke.http.client, "HTTPConnection", ErrorConnection
+    )
+    refused = frontend_api_contract_smoke._live_get_json(
+        "http://127.0.0.1:8080", "/status", 1
+    )
+    assert refused["ok"] is False
+    assert refused["error"] == "connection refused"
+
+    class Response:
+        def __init__(self, status, body):
+            self.status = status
+            self._body = body
+
+        def read(self):
+            return self._body
+
+    class JsonConnection:
+        status = 200
+        body = b'{"status": "ok"}'
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return Response(self.status, self.body)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        frontend_api_contract_smoke.http.client, "HTTPConnection", JsonConnection
+    )
+    live = frontend_api_contract_smoke._live_get_json(
+        "http://127.0.0.1:8080", "/status", 1
+    )
+    assert live["ok"] is True
+    assert live["keys"] == ["status"]
+
+    JsonConnection.status = 503
+    JsonConnection.body = b"not-json"
+    non_json = frontend_api_contract_smoke._live_get_json(
+        "http://127.0.0.1:8080", "/status", 1
+    )
+    assert non_json["error"] == "response_not_json"
+    assert non_json["status_code"] == 503
+
+    monkeypatch.setattr(
+        frontend_api_contract_smoke,
+        "_live_get_json",
+        lambda *args, **kwargs: {
+            "url": "http://127.0.0.1:8080/status",
+            "ok": False,
+            "status_code": 500,
+            "error": "down",
+        },
+    )
+    missing = generate_frontend_api_contract_smoke(
+        frontend_dir=str(tmp_path / "no_frontend"),
+        api_server_path=str(tmp_path / "missing_server.py"),
+        live_api=True,
+        strict=True,
+    )
+    missing_codes = {finding["code"] for finding in missing["findings"]}
+    assert missing["summary"]["live_checks"] == len(
+        frontend_api_contract_smoke.SMOKE_URLS
+    )
+    assert "frontend_app_missing" in missing_codes
+    assert "frontend_index_missing" in missing_codes
+    assert "api_server_missing" in missing_codes
+    assert "live_api_endpoint_failed" in missing_codes
+
+    monkeypatch.setattr(
+        frontend_api_contract_smoke,
+        "generate_frontend_api_contract_smoke",
+        lambda *args, **kwargs: {
+            "title": "Frontend",
+            "status": "warn",
+            "summary": {},
+            "findings": [{"severity": "warning", "code": "x", "message": "warn"}],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["frontend_api_contract_smoke", "--fail-on-warning"],
+    )
+    with pytest.raises(SystemExit):
+        frontend_api_contract_smoke.main()
+    assert '"title": "Frontend"' in capsys.readouterr().out
+
+
+@pytest.mark.unit
 def test_data_freshness_report_passes_for_fresh_complete_duckdb(tmp_path, mock_config):
     db_path = str(tmp_path / "fresh.duckdb")
     now = pd.Timestamp.now(tz="UTC").floor("s").tz_localize(None)
@@ -691,6 +810,347 @@ def test_data_freshness_report_flags_missing_db_and_corrupt_features(
     assert "ohlcv_stale" in codes
     assert "ohlcv_gaps_detected" in codes
     assert "feature_json_invalid" in codes
+
+
+@pytest.mark.unit
+def test_data_freshness_report_flags_integrity_edges_and_cli_failure(
+    tmp_path, mock_config, monkeypatch, capsys
+):
+    partial_db = tmp_path / "partial.duckdb"
+    conn = duckdb.connect(str(partial_db))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE ohlcv (
+                timestamp TIMESTAMP,
+                symbol VARCHAR,
+                timeframe VARCHAR,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume DOUBLE
+            )
+            """
+        )
+    finally:
+        conn.close()
+
+    partial = generate_data_freshness_report(
+        mock_config,
+        db_path=str(partial_db),
+        strict=True,
+    )
+    partial_codes = {finding["code"] for finding in partial["findings"]}
+    assert "duckdb_table_missing" in partial_codes
+    assert "duckdb_table_empty" in partial_codes
+    assert "ohlcv_timestamp_missing" in partial_codes
+
+    db_path = tmp_path / "integrity.duckdb"
+    conn = duckdb.connect(str(db_path))
+    now = pd.Timestamp.now(tz="UTC").floor("s").tz_localize(None)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE ohlcv (
+                timestamp TIMESTAMP,
+                symbol VARCHAR,
+                timeframe VARCHAR,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume DOUBLE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE ticks (
+                timestamp TIMESTAMP,
+                symbol VARCHAR,
+                price DOUBLE,
+                quantity DOUBLE,
+                is_buyer_maker BOOLEAN,
+                trade_id BIGINT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE features (
+                timestamp TIMESTAMP,
+                symbol VARCHAR,
+                timeframe VARCHAR,
+                feature_set_id VARCHAR,
+                features_json VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE market_snapshots (
+                timestamp TIMESTAMP,
+                symbol VARCHAR,
+                funding_rate DOUBLE,
+                open_interest DOUBLE,
+                mark_price DOUBLE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE paper_equity_snapshots (
+                timestamp TIMESTAMP,
+                book_id VARCHAR,
+                equity DOUBLE,
+                long_qty DOUBLE,
+                short_qty DOUBLE,
+                mark_price DOUBLE,
+                regime VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO ohlcv VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (now, "ETHUSDC", "3m", 100, 101, 99, 100, 10),
+                (now, "ETHUSDC", "3m", None, 101, 99, 100, -1),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO ticks VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (now, "ETHUSDC", 100, 1, False, 7),
+                (now, "ETHUSDC", 101, 1, True, 7),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO features VALUES (?, ?, ?, ?, ?)",
+            [
+                (now, "ETHUSDC", "3m", "default", "{bad-json"),
+                (now, "ETHUSDC", "3m", "default", '{"ok": true}'),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO market_snapshots VALUES (?, ?, ?, ?, ?)",
+            [
+                (now, "ETHUSDC", 0.0, 1000, 100),
+                (now, "ETHUSDC", 0.0, 1000, 100),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO paper_equity_snapshots VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (now, "primary", 1000, 0.1, 0.0, 100, "TREND"),
+                (now, "primary", 1001, 0.1, 0.0, 100, "TREND"),
+            ],
+        )
+    finally:
+        conn.close()
+
+    integrity = generate_data_freshness_report(
+        mock_config,
+        db_path=str(db_path),
+        now=now.to_pydatetime(),
+        max_ohlcv_age_minutes=10,
+        max_tick_age_minutes=10,
+        max_market_age_minutes=10,
+        max_feature_age_minutes=10,
+        max_equity_age_minutes=10,
+        strict=True,
+    )
+    codes = {finding["code"] for finding in integrity["findings"]}
+    assert "ohlcv_duplicate_keys" in codes
+    assert "ohlcv_null_required_fields" in codes
+    assert "ohlcv_negative_volume" in codes
+    assert "tick_duplicate_keys" in codes
+    assert "feature_duplicate_keys" in codes
+    assert "feature_json_invalid" in codes
+    assert "market_snapshot_duplicate_keys" in codes
+    assert "paper_equity_duplicate_keys" in codes
+
+    unreadable_db = tmp_path / "unreadable.duckdb"
+    unreadable_db.touch()
+    monkeypatch.setattr(
+        data_freshness_check.duckdb,
+        "connect",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    unreadable = generate_data_freshness_report(
+        mock_config,
+        db_path=str(unreadable_db),
+        strict=True,
+    )
+    assert "duckdb_unreadable" in {
+        finding["code"] for finding in unreadable["findings"]
+    }
+
+    monkeypatch.setattr(data_freshness_check, "load_config", lambda path: mock_config)
+    monkeypatch.setattr(
+        data_freshness_check,
+        "generate_data_freshness_report",
+        lambda *args, **kwargs: {
+            "title": "Data",
+            "status": "fail",
+            "summary": {},
+            "findings": [{"severity": "error", "code": "x", "message": "fail"}],
+        },
+    )
+    monkeypatch.setattr(sys, "argv", ["data_freshness_check"])
+    with pytest.raises(SystemExit):
+        data_freshness_check.main()
+    assert '"title": "Data"' in capsys.readouterr().out
+
+
+@pytest.mark.unit
+def test_experiment_ledger_auditor_flags_registry_and_ledger_edges(
+    tmp_path, mock_config
+):
+    registry = ModelRegistry(registry_dir=str(tmp_path / "models"))
+    model_path = registry.register_model("candidate-v1", "GBM", {"sharpe": 0.5})
+    assert experiment_ledger_auditor._artifact_exists({}) is False
+    misc_dir = tmp_path / "custom_artifact"
+    misc_dir.mkdir()
+    (misc_dir / "artifact.bin").write_text("x", encoding="utf-8")
+    assert experiment_ledger_auditor._artifact_exists(
+        {"artifact_path": str(misc_dir), "type": "CUSTOM"}
+    )
+
+    ledger = tmp_path / "experiments.jsonl"
+    future = datetime(2026, 5, 21, 10, 0, tzinfo=timezone.utc).isoformat()
+    past = datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc).isoformat()
+    ledger.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event": "run_started",
+                        "run_id": "run-dup",
+                        "run_type": "candidate_retrain",
+                        "status": "RUNNING",
+                        "timestamp": future,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "run_started",
+                        "run_id": "run-dup",
+                        "run_type": "candidate_retrain",
+                        "status": "RUNNING",
+                        "timestamp": future,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "run_completed",
+                        "run_id": "run-dup",
+                        "status": "MYSTERY",
+                        "timestamp": past,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "run_completed",
+                        "run_id": "run-dup",
+                        "status": "MYSTERY",
+                        "timestamp": past,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "run_started",
+                        "run_id": "run-fail",
+                        "run_type": "nightly",
+                        "status": "RUNNING",
+                        "timestamp": past,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "run_completed",
+                        "run_id": "run-fail",
+                        "status": "FAILED",
+                        "timestamp": future,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "run_started",
+                        "run_id": "run-model",
+                        "run_type": "candidate_retrain",
+                        "status": "RUNNING",
+                        "timestamp": past,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "step",
+                        "run_id": "run-model",
+                        "step": "train",
+                        "status": "PASSED",
+                        "timestamp": past,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "event": "run_completed",
+                        "run_id": "run-model",
+                        "status": "COMPLETED",
+                        "model_id": "candidate-v1",
+                        "timestamp": future,
+                    }
+                ),
+                json.dumps({"event": "surprise", "run_id": "run-unknown"}),
+                json.dumps({"event": "step", "step": "orphan"}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    tracker = ExperimentTracker(str(ledger))
+
+    report = generate_experiment_ledger_audit(
+        mock_config,
+        tracker=tracker,
+        registry=registry,
+        strict=True,
+        now=datetime(2026, 5, 21, 10, 30, tzinfo=timezone.utc),
+    )
+
+    codes = {finding["code"] for finding in report["findings"]}
+    assert model_path.endswith("candidate-v1")
+    assert "duplicate_run_start" in codes
+    assert "duplicate_run_completion" in codes
+    assert "completion_before_start" in codes
+    assert "unknown_run_status" in codes
+    assert "run_unsuccessful" in codes
+    assert "candidate_retrain_steps_missing" in codes
+    assert "run_model_manifest_missing" in codes
+    assert "run_model_artifact_missing" in codes
+    assert "run_model_snapshot_missing" in codes
+    assert "ledger_unknown_events" in codes
+    assert "ledger_events_without_run_id" in codes
+
+    empty_ledger = tmp_path / "empty.jsonl"
+    empty_ledger.write_text("", encoding="utf-8")
+    empty = generate_experiment_ledger_audit(
+        mock_config,
+        tracker=ExperimentTracker(str(empty_ledger)),
+        registry=registry,
+        ledger_path=str(empty_ledger),
+    )
+    assert "experiment_runs_missing" in {
+        finding["code"] for finding in empty["findings"]
+    }
+
+    missing = generate_experiment_ledger_audit(
+        mock_config,
+        tracker=ExperimentTracker(str(tmp_path / "missing.jsonl")),
+        registry=registry,
+        ledger_path=str(tmp_path / "missing.jsonl"),
+        strict=True,
+    )
+    assert "ledger_missing" in {finding["code"] for finding in missing["findings"]}
 
 
 @pytest.mark.unit

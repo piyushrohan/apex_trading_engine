@@ -16,6 +16,7 @@ Tracks delivery against [PRODUCTION_CHECKLIST_AND_ROADMAP.md](./PRODUCTION_CHECK
 | **Milestone 8** — Terminal | `DONE` |
 | **Milestone 9** — Contextual bandit selector | `DONE` |
 | **Phase 0** — Foundations | `DONE` |
+| **Trader production hardening** — order telemetry, drift, controls, cockpit replay | `DONE` |
 
 ---
 
@@ -107,6 +108,7 @@ Run the trading pipeline in another terminal so `/status` and `/explain/latest` 
 | Reproducibility manifests | DONE | Model registry writes `manifest.json` with git hash, data snapshot id, hyperparams, and metrics |
 | Shadow metrics | DONE | Shadow decisions log timestamp, equity, PnL, and bandit context for promotion windows |
 | Model governance discipline | DONE | Registry lifecycle states, experiment run ledger, immutable manifests, configurable gates, and live startup model readiness guard |
+| Active feature drift evidence | DONE | Retrain stores training feature references and `/models/drift` compares current DuckDB features with active model evidence |
 
 ### Milestone 6 exit criteria
 
@@ -186,10 +188,11 @@ venv/bin/pytest -q
 | Trader readiness API | DONE | `/ops/readiness` summarizes live blockers, paper gate, fill evidence, model readiness, runtime freshness, and data diagnostics |
 | Cockpit Ops tab | DONE | Frontend adds `Ops` with guardrail findings, data freshness, live-gate snapshot, and next actions |
 | Exchange rule validation foundation | DONE | Binance REST client validates `exchangeInfo` constraints for USDC margin, `GTX`, price filter, lot size, and min notional |
-| Full order lifecycle analytics | TODO | Add persistent submit/ack/open/partial/cancel/replace/fill/reject telemetry |
-| Feature drift and label stability reports | IN_PROGRESS | Retrain now records label stability and classifier calibration; next step is live feature drift against active model snapshots |
-| Separate kill-switch lanes | TODO | Split model, data, execution, account-sync, and manual operator kill switches |
-| Chart overlays and replay mode | TODO | Add candles with decisions/fills, probability history, shadow-vs-primary comparison, and session replay |
+| Full order lifecycle analytics | DONE | Paper/live adapters persist submit/open/fill/cancel/reject lifecycle events to DuckDB/JSONL; API summarizes fill rate, queue age, cancel/replace ratio, rejects, and post-fill drift |
+| Feature drift and label stability reports | DONE | Retrain records label stability, classifier calibration, and training feature references; `/models/drift` and `/ops/readiness` expose active-model drift |
+| Separate kill-switch lanes | DONE | Manual, model, data, execution, and account-sync lanes are normalized, persisted, surfaced in status/readiness, and controllable from the cockpit |
+| Chart overlays and replay mode | DONE | Frontend history view adds decision replay chart, probability history, fill markers, and order-fill timeline from lifecycle telemetry |
+| Coverage expansion | DONE | Strict full-suite coverage now passes `--cov-fail-under=98` at 98.06% |
 
 ---
 
@@ -206,3 +209,4 @@ venv/bin/pytest -q
 | 2026-05-20 | **Model governance hardening** — experiment tracking, strict registry lifecycle, stress gates, readiness API/frontend, and live model evidence guard |
 | 2026-05-21 | **Trader production readiness** — added quant-critic backlog, shadow artifact quarantine, `/ops/readiness`, cockpit Ops tab, and exchange-rule validation foundation |
 | 2026-05-21 | **Model quality upgrade** — added fee-adjusted horizon labels, label stability diagnostics, probability calibration diagnostics, and quality gates for shadow promotion |
+| 2026-05-21 | **Trader hardening completion** — added order lifecycle telemetry, feature drift API/readiness checks, lane-specific kill switches, replay overlays, frontend contract updates, and 98.06% strict coverage |

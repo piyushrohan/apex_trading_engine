@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from src.execution.adapters.base import OrderRequest
 from src.execution.adapters.paper import PaperExecutionAdapter
+from src.execution.order_lifecycle import OrderLifecycleRecorder
 from src.execution.portfolio import PortfolioService
 from src.execution.risk_engine import RiskEngine
 from src.mlops.registry import ModelRegistry
@@ -33,12 +34,14 @@ class ShadowLaneRunner:
         portfolio: PortfolioService,
         symbol: str,
         operator_mode: str,
+        cache: Any = None,
     ):
         self.config = config
         self.registry = registry
         self.portfolio = portfolio
         self.symbol = symbol
         self.operator_mode = operator_mode
+        self.cache = cache
         self.enabled = config.get("shadow", {}).get("enabled", False)
         self.max_parallel = config.get("shadow", {}).get("max_parallel_candidates", 2)
         self.initial_equity = config.get("environment", {}).get(
@@ -99,7 +102,18 @@ class ShadowLaneRunner:
                 }
                 logger.exception("Shadow model artifact load failed for %s", model_id)
                 continue
-            adapter = PaperExecutionAdapter(book_id=book_id)
+            recorder = OrderLifecycleRecorder(
+                path=self.config.get("execution", {}).get(
+                    "order_lifecycle_path", "data_lake/order_lifecycle.jsonl"
+                ),
+                cache=self.cache,
+                execution_mode=self.operator_mode,
+                book_id=book_id,
+            )
+            adapter = PaperExecutionAdapter(
+                book_id=book_id,
+                lifecycle_recorder=recorder,
+            )
             self.lanes[model_id] = {
                 "book": book,
                 "controller": controller,

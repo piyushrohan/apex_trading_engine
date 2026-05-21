@@ -8,6 +8,7 @@ import pandas as pd
 from src.data.cache_manager import DuckDBCacheManager
 from src.mlops.evaluator import ModelEvaluator
 from src.mlops.experiment_tracker import ExperimentTracker, stable_hash
+from src.mlops.feature_drift import build_feature_reference
 from src.mlops.registry import ModelRegistry
 from src.models.gbm_agent import GBMAgent
 from src.models.ppo_agent import PPOAgent
@@ -174,6 +175,9 @@ class AutoRetrainPipeline:
                 "feature_version": self.config.get("mlops", {}).get(
                     "feature_version", "v1"
                 ),
+                "feature_reference": build_feature_reference(
+                    train_df, self._feature_columns()
+                ),
                 "config_hash": stable_hash(self.config),
             }
             try:
@@ -214,6 +218,7 @@ class AutoRetrainPipeline:
                 stress_metrics = {"stress_passed": metrics.get("passed_safety", False)}
             walk_forward_metrics = self._walk_forward_validate(dataset, model_type)
             metrics["training"] = train_metrics
+            metrics["feature_reference"] = metadata["feature_reference"]
             metrics["label_quality"] = label_quality
             metrics["classifier_quality"] = classifier_quality
             metrics["stress"] = stress_metrics

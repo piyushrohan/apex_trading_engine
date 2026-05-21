@@ -2,7 +2,23 @@
 
 This document turns the full institutional spec into an actionable checklist, defines **two operator modes** (paper / live) plus an **MLOps shadow sub-lane** (shared virtual simulator), **multi-strategy hedge mode** (rule-based selector → contextual bandit), lays out a phased roadmap to production, and includes a copy-paste **agent prompt** to complete the project.
 
-> Implementation note (2026-05-19): milestone delivery through **Milestone 9** is now implemented in code and tracked in [PROGRESS.md](./PROGRESS.md). The historical checklist below is kept as the original production spec; use PROGRESS.md for current completion state and verification results.
+> Implementation note (2026-05-21): milestone delivery through **Milestone 9** plus the trader production hardening backlog is now implemented in code and tracked in [PROGRESS.md](./PROGRESS.md). The historical checklist below is kept as the original production spec; use PROGRESS.md and [TRADER_PRODUCTION_BACKLOG.md](./TRADER_PRODUCTION_BACKLOG.md) for current completion state and verification results.
+
+## Current Hardening Addendum
+
+The latest implementation closes the most important remaining trader-facing
+gaps identified after the production-readiness review:
+
+- Order lifecycle telemetry now persists paper/live submit, open, fill, cancel,
+  and reject events to DuckDB/JSONL and exposes `/orders/lifecycle`.
+- Active model feature drift now compares current DuckDB features with the
+  training reference captured during auto-retrain and feeds `/models/drift` plus
+  `/ops/readiness`.
+- Kill switches are split into manual, model, data, execution, and account-sync
+  lanes so an operator can see which safety system is blocking trading.
+- The browser terminal history view includes replay-style decision overlays,
+  probability history, fill markers, and an order-fill timeline.
+- Strict full-suite coverage now passes `--cov-fail-under=98` at 98.06%.
 
 ---
 

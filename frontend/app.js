@@ -66,6 +66,11 @@
     return `${Math.floor(minutes / 60)}h ago`;
   }
 
+  function activeKillLanes(source = {}) {
+    const lanes = source.kill_switch_lanes || {};
+    return Object.keys(lanes).filter((lane) => lanes[lane]?.active);
+  }
+
   async function getJson(url, fallback = null) {
     const response = await fetch(url);
     if (!response.ok) return fallback;
@@ -103,9 +108,11 @@
       decisions: { items: [], total: 0 },
       equity: { items: [], total: 0 },
       market: { ohlcv: [], market: [] },
+      orders: { items: [], summary: {} },
       models: { models: {} },
       lifecycle: { runs: [], production_readiness: { blockers: [] } },
       promotion: null,
+      drift: null,
       readiness: null,
       logs: { files: [] },
       audit: { items: [], total: 0 },
@@ -136,9 +143,11 @@
           decisions,
           equity,
           market,
+          orders,
           models,
           lifecycle,
           promotion,
+          drift,
           readiness,
           logs,
           audit,
@@ -156,12 +165,14 @@
           }),
           getJson(`${apiBase}/history/equity?limit=500`, { items: [], total: 0 }),
           getJson(`${apiBase}/history/market?limit=160`, { ohlcv: [], market: [] }),
+          getJson(`${apiBase}/orders/lifecycle?limit=120`, { items: [], summary: {} }),
           getJson(`${apiBase}/models`, { models: {} }),
           getJson(`${apiBase}/models/lifecycle?limit=12`, {
             runs: [],
             production_readiness: { blockers: [] },
           }),
           getJson(`${apiBase}/models/promotion/status`, null),
+          getJson(`${apiBase}/models/drift`, null),
           getJson(`${apiBase}/ops/readiness`, null),
           getJson(`${apiBase}/logs/runtime?limit=80`, { files: [] }),
           getJson(`${apiBase}/audit?limit=80`, { items: [], total: 0 }),
@@ -178,9 +189,11 @@
           decisions,
           equity,
           market,
+          orders,
           models,
           lifecycle,
           promotion,
+          drift,
           readiness,
           logs,
           audit,
@@ -388,6 +401,7 @@
     const status = state.status || {};
     const portfolio = state.portfolio?.runtime || status.portfolio || {};
     const controls = state.controls || {};
+    const lanes = activeKillLanes(status);
     return h(
       "section",
       { className: "layout two-one" },
@@ -400,6 +414,7 @@
               ["Regime", status.regime || "-"],
               ["Mark", num(status.mark_price, 2)],
               ["Kill Switch", status.kill_switch_active ? "ACTIVE" : "SAFE"],
+              ["Active Lanes", lanes.length ? lanes.join(", ") : "none"],
               ["Ingestion", status.ingestion_enabled ? "ON" : "OFF"],
               ["Hedge", status.hedge_enabled ? "ON" : "OFF"],
               ["Updated", ago(status.updated_at)],
@@ -438,8 +453,10 @@
           { className: "button-grid" },
           h("button", { onClick: () => requestCommand("pause") }, "Pause"),
           h("button", { onClick: () => requestCommand("resume") }, "Resume"),
-          h("button", { className: "danger-button", onClick: () => requestCommand("kill-switch") }, "Kill"),
-          h("button", { onClick: () => requestCommand("clear-kill-switch") }, "Clear kill"),
+          h("button", { className: "danger-button", onClick: () => requestCommand("kill-switch", { lane: "manual" }) }, "Manual kill"),
+          h("button", { className: "danger-button", onClick: () => requestCommand("kill-switch", { lane: "execution" }) }, "Exec kill"),
+          h("button", { onClick: () => requestCommand("clear-kill-switch", { lane: "manual" }) }, "Clear manual"),
+          h("button", { onClick: () => requestCommand("clear-kill-switch") }, "Clear all"),
           h("button", { className: "danger-button", onClick: () => requestCommand("flatten") }, "Flatten"),
         ),
         h("label", { className: "field-label" }, "Mode request"),
@@ -594,6 +611,7 @@
       || { blockers: [] };
     const blockers = readiness.blockers || [];
     const runs = lifecycle.runs || [];
+    const drift = state.drift || {};
     return h(
       "section",
       { className: "stack" },
@@ -667,6 +685,20 @@
         h("pre", { className: "json-box" }, JSON.stringify(promotion, null, 2))
       )
       ),
+      h(Panel, { title: "Feature Drift" },
+        h(KpiGrid, {
+          items: [
+            ["Status", drift.status || "unavailable"],
+            ["Model", drift.model_id || "-"],
+            ["Rows", drift.current_rows ?? "-"],
+            ["Max |z|", num(drift.max_abs_z, 3)],
+          ],
+        }),
+        h(Table, {
+          rows: (drift.features || []).slice(0, 12),
+          columns: ["feature", "status", "reference_mean", "current_mean", "z_score"],
+        })
+      ),
       h(Panel, { title: "Experiment Runs" },
         h(Table, {
           rows: runs.map((run) => ({
@@ -686,6 +718,8 @@
   function HistoryView({ state, decisionFilter, setDecisionFilter, onRefresh }) {
     const decisions = state.decisions?.items || [];
     const market = state.market?.ohlcv || [];
+    const orders = state.orders?.items || [];
+    const orderSummary = state.orders?.summary || {};
     return h(
       "section",
       { className: "stack" },
@@ -709,11 +743,34 @@
           columns: ["timestamp", "decision", "conviction_score", "active_regime", "model_id"],
         })
       ),
+      h(Panel, { title: "Probability History" },
+        h(Sparkline, {
+          rows: decisions.slice().reverse(),
+          valueKey: "conviction_score",
+          label: "Decision confidence",
+        })
+      ),
       h(Panel, { title: "Market Replay Slice" },
-        h(Sparkline, { rows: market, valueKey: "close", label: "Close price" }),
+        h(DecisionReplayChart, { market, decisions, orders }),
         h(Table, {
           rows: market.slice(-18).reverse(),
           columns: ["timestamp", "open", "high", "low", "close", "volume"],
+        })
+      ),
+      h(Panel, { title: "Order Fill Timeline" },
+        h(KpiGrid, {
+          items: [
+            ["Submitted", orderSummary.submitted ?? "-"],
+            ["Fills", orderSummary.fills ?? "-"],
+            ["Rejects", orderSummary.rejects ?? "-"],
+            ["Fill Rate", pct(orderSummary.fill_rate, 2)],
+            ["Queue Age", orderSummary.avg_queue_age_ms ? `${num(orderSummary.avg_queue_age_ms, 1)}ms` : "-"],
+            ["Post-Fill Drift", orderSummary.avg_post_fill_drift_bps ? `${num(orderSummary.avg_post_fill_drift_bps, 2)} bps` : "-"],
+          ],
+        }),
+        h(Table, {
+          rows: orders.slice(0, 25),
+          columns: ["timestamp", "event", "order_id", "side", "quantity", "price", "status"],
         })
       )
     );
@@ -1003,6 +1060,67 @@
         "svg",
         { className: "sparkline", viewBox: `0 0 ${width} ${height}`, role: "img" },
         h("polyline", { points, fill: "none", strokeWidth: "3" })
+      )
+    );
+  }
+
+  function DecisionReplayChart({ market, decisions, orders }) {
+    const values = (market || [])
+      .map((row) => ({ timestamp: row.timestamp, close: Number(row.close) }))
+      .filter((row) => Number.isFinite(row.close));
+    if (values.length < 2) {
+      return h("div", { className: "empty-chart" }, "Replay: not enough market history yet");
+    }
+    const width = 680;
+    const height = 180;
+    const min = Math.min(...values.map((row) => row.close));
+    const max = Math.max(...values.map((row) => row.close));
+    const span = max - min || 1;
+    const xFor = (idx) => (idx / Math.max(1, values.length - 1)) * width;
+    const yFor = (price) => height - ((price - min) / span) * (height - 18) - 9;
+    const points = values
+      .map((row, index) => `${xFor(index).toFixed(1)},${yFor(row.close).toFixed(1)}`)
+      .join(" ");
+    const timeIndex = new Map(values.map((row, index) => [String(row.timestamp).slice(0, 16), index]));
+    const markers = (decisions || []).slice(0, 40).map((row) => {
+      const key = String(row.timestamp || "").slice(0, 16);
+      const idx = timeIndex.get(key);
+      if (idx === undefined) return null;
+      const close = values[idx].close;
+      const tone = row.decision === "LONG" ? "ok" : row.decision === "SHORT" ? "danger" : "warn";
+      return h("circle", {
+        key: `d-${row.timestamp}-${idx}`,
+        className: `decision-dot decision-dot-${tone}`,
+        cx: xFor(idx),
+        cy: yFor(close),
+        r: 5,
+      });
+    }).filter(Boolean);
+    const fillMarkers = (orders || []).slice(0, 40).map((row) => {
+      if (!["filled", "partially_filled", "fill"].includes(row.event)) return null;
+      const key = String(row.timestamp || "").slice(0, 16);
+      const idx = timeIndex.get(key);
+      if (idx === undefined) return null;
+      const price = Number(row.fill_price || row.price || values[idx].close);
+      return h("rect", {
+        key: `f-${row.timestamp}-${idx}`,
+        className: "fill-marker",
+        x: xFor(idx) - 4,
+        y: yFor(price) - 4,
+        width: 8,
+        height: 8,
+      });
+    }).filter(Boolean);
+    return h(
+      "div",
+      { className: "chart-wrap" },
+      h("div", { className: "chart-label" }, `Replay close (${num(min, 2)} - ${num(max, 2)})`),
+      h(
+        "svg",
+        { className: "sparkline replay-chart", viewBox: `0 0 ${width} ${height}`, role: "img" },
+        h("polyline", { points, fill: "none", strokeWidth: "3" }),
+        ...markers,
+        ...fillMarkers
       )
     );
   }

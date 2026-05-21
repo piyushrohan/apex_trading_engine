@@ -22,6 +22,7 @@ class StatusStore:
     regime: Optional[str] = None
     mark_price: Optional[float] = None
     kill_switch_active: bool = False
+    kill_switch_lanes: Dict[str, Any] = field(default_factory=dict)
     model_id: Optional[str] = None
     last_explanation: Optional[Dict[str, Any]] = None
     sizing_calibration: Optional[Dict[str, Any]] = None
@@ -38,6 +39,7 @@ class StatusStore:
             "regime": self.regime,
             "mark_price": self.mark_price,
             "kill_switch_active": self.kill_switch_active,
+            "kill_switch_lanes": dict(self.kill_switch_lanes),
             "model_id": self.model_id,
             "ingestion_enabled": self.ingestion_enabled,
             "hedge_enabled": self.hedge_enabled,
@@ -72,6 +74,7 @@ class StatusStore:
         regime: Optional[str] = None,
         mark_price: Optional[float] = None,
         kill_switch_active: Optional[bool] = None,
+        kill_switch_lanes: Optional[Dict[str, Any]] = None,
         model_id: Optional[str] = None,
         last_explanation: Optional[Dict[str, Any]] = None,
         sizing_calibration: Optional[Dict[str, Any]] = None,
@@ -90,6 +93,8 @@ class StatusStore:
                 self.mark_price = mark_price
             if kill_switch_active is not None:
                 self.kill_switch_active = kill_switch_active
+            if kill_switch_lanes is not None:
+                self.kill_switch_lanes = dict(kill_switch_lanes)
             if model_id is not None:
                 self.model_id = model_id
             if last_explanation is not None:
