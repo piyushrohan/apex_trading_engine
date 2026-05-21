@@ -1,6 +1,6 @@
 # APEX Testing And Validation Runbook
 
-This runbook is the operational reference for validating the APEX trading engine locally and understanding the CI gates. It reflects the recent test coverage expansion across REST/WS data paths, ingestion, DuckDB cache behavior, market state, trading pipeline edge paths, MLOps registry/promotion, model governance, reports, frontend static checks, and contextual hedge bandit logic.
+This runbook is the operational reference for validating the APEX trading engine locally and understanding the CI gates. It reflects the recent test coverage expansion across REST/WS data paths, ingestion, DuckDB cache behavior, market state, trading pipeline edge paths, MLOps registry/promotion, model governance, order lifecycle telemetry, feature drift, kill-switch lanes, reports, frontend static checks, and contextual hedge bandit logic.
 
 ## Latest Validated Snapshot
 
@@ -14,16 +14,16 @@ make ci-local
 Strict local coverage enforcement:
 
 ```bash
-venv/bin/pytest -m "not slow and not replay" \
+venv/bin/pytest tests/ \
   --cov=src \
   --cov-report=term-missing \
-  --cov-fail-under=95
-# Required test coverage of 95% reached.
+  --cov-fail-under=98
+# Required test coverage of 98% reached.
 #
 # Latest strict full-suite check:
-# venv/bin/pytest tests/ -v --cov=src --cov-fail-under=95 --cov-report=xml
-# 244 passed
-# Total coverage: 95.16%
+# venv/bin/pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=98
+# 323 passed
+# Total coverage: 98.06%
 ```
 
 Risk gate:
@@ -249,17 +249,17 @@ Open the report:
 open htmlcov/index.html
 ```
 
-Note: `make coverage` currently reports coverage but does not set a local fail-under threshold. Use the strict command below when you need to enforce the 95% local gate.
+Note: `make coverage` currently reports coverage but does not set a local fail-under threshold. Use the strict command below when you need to enforce the 98% local gate.
 
 ## Strict Coverage Commands
 
 Fast strict coverage gate used after the recent work:
 
 ```bash
-venv/bin/pytest -m "not slow and not replay" \
+venv/bin/pytest tests/ \
   --cov=src \
   --cov-report=term-missing \
-  --cov-fail-under=95
+  --cov-fail-under=98
 ```
 
 Full strict coverage including replay/slow tests when present:
@@ -269,7 +269,7 @@ venv/bin/pytest \
   --cov=src \
   --cov-report=html \
   --cov-report=term-missing \
-  --cov-fail-under=95
+  --cov-fail-under=98
 ```
 
 Execution/risk granular gate similar to CI:
@@ -323,10 +323,14 @@ The latest coverage work added and expanded tests in these areas:
 | `src/data/ingestion_service.py` | disabled no-op paths, bootstrap totals, current-cache skip, gap repair, funding loop recovery, WS mark/depth/aggTrade handling, `_main` cleanup |
 | `src/data/market_state.py` | empty cache, empty features, latest snapshot fallbacks, feature persistence failure, owned-cache close |
 | `src/pipelines/trading_pipeline.py` | live prep, startup validation, account bootstrap, status publishing, bandit decision logging, signal execution, hedge/grid orders, paper fills, kill switch, stop cleanup |
+| `src/execution/order_lifecycle.py` and `src/execution/kill_switch.py` | lifecycle JSONL/DuckDB hooks, queue age summaries, lane normalization, active lane reporting, and invalid lane rejection |
+| `src/mlops/feature_drift.py` | training feature references, missing/empty current features, warning/critical drift, and OHLCV feature-frame generation |
 | `src/mlops/registry.py` | manifest writes, git hash fallback, metric/status updates, shadow archival, rollback edges |
 | `src/mlops/promotion_service.py` | insufficient history, small edge hold, drawdown reject, metrics from decision logs, rollback breach/no-breach |
 | `src/strategies/hedge/bandit_selector.py` | empty selector, missing rule scores, tie/exploration, reward updates, state load/save, decision bootstrap |
-| `src/reports/*.py` | missing/empty journal paths, empty cache reports, fill counts, invalid timestamps, CLI main functions |
+| `src/reports/*.py` | missing/empty journal paths, DuckDB integrity faults, frontend/API live smoke failures, fill counts, invalid timestamps, CLI main functions |
+| `src/api/server.py` | order lifecycle/drift endpoints, readiness blockers, DuckDB diagnostics, control lanes, and JSON-safe DB row conversion |
+| `src/observability/metrics.py` | Prometheus and no-op fallback branches |
 | `src/pipelines/live_trade.py` | build pipeline and KeyboardInterrupt stop behavior |
 
 Current high-confidence modules include data cache, market state, registry, bandit selector, live trade, position sync, portfolio, live gate, risk engine, order manager, slippage, and hedge registry.
@@ -504,15 +508,15 @@ pytest tests/execution/test_live_gate.py -n 0 -vv
 
 Then check whether the test uses a shared DB path. Fix by using `tmp_path`.
 
-### Coverage is below 95%
+### Coverage is below 98%
 
 Print missing lines:
 
 ```bash
-venv/bin/pytest -m "not slow and not replay" \
+venv/bin/pytest tests/ \
   --cov=src \
   --cov-report=term-missing \
-  --cov-fail-under=95
+  --cov-fail-under=98
 ```
 
 Open HTML details:
@@ -583,9 +587,9 @@ ruff check src tests
 pytest tests/<changed-area> -q
 make test-risk
 make test
-venv/bin/pytest -m "not slow and not replay" \
+venv/bin/pytest tests/ \
   --cov=src \
   --cov-report=term-missing \
-  --cov-fail-under=95
+  --cov-fail-under=98
 make ci-local
 ```

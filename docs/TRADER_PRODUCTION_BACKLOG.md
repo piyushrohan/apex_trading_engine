@@ -14,6 +14,11 @@ strong enough to justify live market exposure.
 | Trader cockpit Ops tab | DONE | Frontend adds an `Ops` tab with live readiness, critical/warning counts, guardrail findings, data freshness, live-gate snapshot, and next actions. |
 | Exchange rule validation foundation | DONE | Binance REST client can fetch `exchangeInfo`, extract symbol filters, and validate USDC margin, `GTX` post-only support, min notional, price filter, and lot-size filter availability. |
 | Frontend/API smoke coverage | DONE | Contract smoke now includes `/ops/readiness`; frontend static tests cover the new operator readiness tab. |
+| Order lifecycle telemetry | DONE | Paper/live adapters record submit, open, fill, cancel, reject, queue age, fill price, and post-fill mark context to DuckDB/JSONL; `/orders/lifecycle` summarizes execution quality. |
+| Feature drift visibility | DONE | Auto-retrain stores active training feature references; `/models/drift` and `/ops/readiness` compare current features against model evidence and warn on drift. |
+| Lane-specific kill switches | DONE | Manual, model, data, execution, and account-sync kill-switch lanes are persisted independently and visible in status/readiness/cockpit controls. |
+| Trader replay overlays | DONE | The browser history view now combines market path, decisions, fills, probability history, and order-fill timeline for post-session review. |
+| 98% coverage gate | DONE | Full strict local suite passes `venv/bin/pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=98` at 98.06%. |
 
 ## P0 Before Live
 
@@ -30,8 +35,8 @@ strong enough to justify live market exposure.
 | Item | Target Behavior |
 | --- | --- |
 | Idempotent client order ids | Every order, retry, cancel, and replace has a deterministic auditable client id. |
-| Full order lifecycle journal | Persist submit, ack, open, partial fill, cancel, replace, fill, reject, and timeout events. |
-| Maker quote analytics | Track queue age, spread capture, cancel/replace ratio, fill latency, and mid-price drift after fill. |
+| Full order lifecycle journal | DONE: persist submit, open, fill, cancel, and reject events today; replace/timeout can build on the same schema when adapters emit them. |
+| Maker quote analytics | DONE: track queue age, cancel/replace ratio, fill rate, rejects, and post-fill drift; spread capture can be added when order-book snapshots are attached to fills. |
 | Exchange rule startup gate | Validate symbol status, margin asset, tick size, step size, min notional, order limits, rate limits, and `GTX` support before live starts. |
 | User stream health | Track listen-key age, keepalive success, order-update heartbeat, reconnect count, and account-sync lag. |
 
@@ -41,8 +46,8 @@ strong enough to justify live market exposure.
 | --- | --- |
 | Champion/challenger discipline | Current PROD remains champion while SHADOW candidates compete forward-only. |
 | Regime-sliced walk-forward | Validation reports pass/fail by trend, mean reversion, volatility expansion, funding stress, and liquidity sweep regimes. |
-| Feature drift report | Compare live feature distributions with the training snapshot used by the active model. |
-| Label stability report | Retrain now records near-threshold sensitivity and label balance; next step is exposing active-model drift in the cockpit. |
+| Feature drift report | DONE: `/models/drift` compares current DuckDB features with active model training references and feeds `/ops/readiness`. |
+| Label stability report | DONE: retrain records near-threshold sensitivity, label balance, entropy, calibration, and trade-signal coverage in candidate metrics. |
 | No-trade intelligence | Meta-controller should explain when the best decision is no trade because the market is not worth trading. |
 
 ## P1 Risk And Survival
@@ -53,18 +58,18 @@ strong enough to justify live market exposure.
 | Funding and open-interest shock guard | Reduce or block exposure when funding or open-interest moves into abnormal regimes. |
 | Spread and stale-mark guard | Block orders when spread widens, mark price is stale, or exchange data disagrees. |
 | Rolling loss limits | Separate loss limits by hour, day, and rolling 24h window. |
-| Separate kill switches | Model, execution, data, account-sync, and manual operator kill switches should be visible independently. |
+| Separate kill switches | DONE: model, execution, data, account-sync, and manual operator lanes are independently visible and persisted. |
 
 ## P2 Frontend Trader Experience
 
 | Item | Target Behavior |
 | --- | --- |
-| Candles with decisions | Overlay LONG/SHORT/FLAT, fills, cancels, and shadow decisions on recent candles. |
+| Candles with decisions | DONE foundation: history replay chart overlays decisions and fills over recent market path; true OHLC candles/order-book ladder remain a visual upgrade. |
 | Order book ladder | Show spread, best bid/ask, depth imbalance, and quote placement. |
-| Fill timeline | Explain each simulated or live fill with order id, queue age, price, side, and post-fill drift. |
-| Probability history | Chart model action probabilities and confidence buckets over time. |
+| Fill timeline | DONE: order lifecycle table shows event, order id, side, quantity, queue age, fill price, and post-fill drift. |
+| Probability history | DONE: history view charts recent confidence/probability trajectory from persisted decisions. |
 | Shadow vs primary comparison | Show candidate PnL, drawdown, fill quality, decisions, and divergence from primary. |
-| Replay mode | Let the operator replay a historical session and inspect what the model saw at each step. |
+| Replay mode | DONE foundation: browser history view supports session-style review from persisted decisions, market rows, and lifecycle events; step-through playback remains a future interaction polish. |
 
 ## Production Efficiency Target
 

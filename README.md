@@ -2,27 +2,34 @@
 
 APEX is a production-oriented autonomous trading engine for **Binance USD-M Futures on ETHUSDC**. It combines live market-data ingestion, maker-only execution, strict risk controls, explainable model decisions, MLOps shadow lanes, hedge-strategy selection, and a read-only operator API/terminal.
 
-The project is currently implemented through the roadmap's Milestone 9: paper/live operator modes, MLOps shadow lanes, live startup hardening, contextual hedge-bandit support, observability hooks, reporting, and a high-coverage local/CI validation suite.
+The project is currently implemented through the roadmap's Milestone 9 plus the trader production hardening backlog: paper/live operator modes, MLOps shadow lanes, live startup hardening, contextual hedge-bandit support, order lifecycle telemetry, feature drift visibility, lane-specific kill switches, replay-style frontend review, observability hooks, reporting, and a high-coverage local/CI validation suite.
 
 ## Current Status
 
 Latest local validation snapshot:
 
 ```bash
+venv/bin/ruff check src tests
+node --check frontend/app.js
+venv/bin/pytest tests/ --cov=src --cov-report=term-missing --cov-fail-under=98
+# 323 passed
+# Required test coverage of 98% reached. Total coverage: 98.06%
+```
+
+Full local CI-style gate:
+
+```bash
 make ci-local
-# format + lint + typecheck warning pass-through + risk gate + parallel tests + coverage
-# 227 passed
-# total coverage: 96% in make coverage output
+# format + lint + typecheck warning pass-through + frontend checks + risk gate + parallel tests + coverage
 ```
 
 Strict local coverage gate:
 
 ```bash
-venv/bin/pytest -m "not slow and not replay" \
+venv/bin/pytest tests/ \
   --cov=src \
   --cov-report=term-missing \
-  --cov-fail-under=95
-# Required test coverage of 95% reached. Total coverage: 95.91%
+  --cov-fail-under=98
 ```
 
 The risk-only safety gate intentionally selects only tests marked `risk`:
@@ -59,7 +66,9 @@ make test-risk
 - Shared execution adapter contract for paper and live execution.
 - `PaperExecutionAdapter` for virtual maker orders, partial fills, fill-rate metrics, and virtual order flattening.
 - `LiveExecutionAdapter` wrapping signed Binance REST order placement, fills, cancels, and emergency flattening.
+- Order lifecycle recorder for submit/open/fill/cancel/reject telemetry, queue age, fill price, post-fill drift, and execution-quality summaries.
 - `RiskEngine` enforcing Kelly sizing, leverage caps, drawdown limits, hedge constraints, and kill-switch behavior.
+- Lane-specific kill-switch state for manual, model, data, execution, and account-sync blockers.
 - `AccountSynchronizer` for Binance user-data streams, USDC wallet balance sync, position leg parsing, order updates, and reconnect/keepalive paths.
 
 ### Operator Pipelines
@@ -75,6 +84,7 @@ make test-risk
 - GBM and PPO agents support train/save/load flows.
 - `ModelRegistry` supports model registration, metric updates, state transitions, active prod/shadow pointers, rollback, and reproducibility manifests.
 - `AutoRetrainPipeline` trains candidates from DuckDB OHLCV, evaluates out-of-sample performance, writes manifests, and promotes safe candidates to SHADOW.
+- Auto-retrain captures fee-adjusted labels, label stability, probability calibration, and training feature references for drift checks.
 - `ShadowLaneRunner` evaluates candidate models in virtual books alongside the primary operator loop without placing live orders.
 - `PromotionService` compares shadow metrics against primary metrics and promotes, rejects, or rolls back models.
 
@@ -96,11 +106,16 @@ make test-risk
   - `GET /positions`
   - `GET /metrics`
   - `GET /metrics/paper`
+  - `GET /orders/lifecycle`
+  - `GET /models/drift`
+  - `GET /ops/readiness`
+  - `GET /control/state`
   - `WS /ws/status`
-- Static frontend terminal in `frontend/` reads API status, explainability, portfolio, and metrics views.
+- Static frontend terminal in `frontend/` reads API status, explainability, portfolio, models, readiness, order lifecycle, and metrics views.
 - Trader production readiness view exposes live blockers, paper gate status,
   fill evidence, model readiness, runtime freshness, and data health through
   `/ops/readiness` and the cockpit `Ops` tab.
+- History/replay view overlays decisions and fills on recent market path, charts confidence history, and shows an order-fill timeline.
 - Paper report summarizes paper equity snapshots, Sharpe, max drawdown, directional decisions, fills, and fill rate.
 - Hedge report aggregates selected strategies, score observations, average score, and hedge PnL.
 - Operational automation reports cover paper health, shadow lane sanity, model governance, experiment ledger audit, frontend/API contract smoke, and DuckDB freshness/integrity.
@@ -222,10 +237,10 @@ make test-risk
 Strict total coverage gate:
 
 ```bash
-venv/bin/pytest -m "not slow and not replay" \
+venv/bin/pytest tests/ \
   --cov=src \
   --cov-report=term-missing \
-  --cov-fail-under=95
+  --cov-fail-under=98
 ```
 
 Coverage HTML report:
