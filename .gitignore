@@ -13,6 +13,7 @@ data_lake/features/*
 data_lake/orderflow/*
 data_lake/runtime_status.json
 data_lake/runtime_status.tmp
+data_lake/audit_events.jsonl
 data_lake/trade_journal.jsonl
 data_lake/order_lifecycle.jsonl
 data_lake/hedge_bandit/

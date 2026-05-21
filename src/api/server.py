@@ -1,4 +1,4 @@
-"""Read-only FastAPI server for operator status and explainability."""
+"""FastAPI server for operator status, controls, and explainability."""
 
 import asyncio
 import json
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import duckdb
+import websockets
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -33,6 +34,7 @@ from src.mlops.feature_drift import (
 )
 from src.mlops.promotion_service import PromotionService
 from src.mlops.registry import ModelRegistry
+from src.ops.process_manager import PROCESS_MANAGER
 from src.reports.hedge_report import generate_hedge_report
 from src.reports.paper_report import generate_paper_report
 
@@ -70,7 +72,7 @@ DIAGNOSTIC_TABLE_QUERIES = {
 
 app = FastAPI(
     title="APEX Trading Engine API",
-    description="Read-only status and explainability for paper/live operator modes.",
+    description="Status, controls, and explainability for paper/live operator modes.",
     version="1.0.0",
 )
 app.add_middleware(
@@ -120,6 +122,107 @@ def _db_path(config: Dict[str, Any]) -> str:
         .get("storage", {})
         .get("db_path", "data_lake/apex_market_data.duckdb")
     )
+
+
+def _api_cfg(config: Dict[str, Any]) -> Dict[str, Any]:
+    return config.get("api", {})
+
+
+def _market_stream_url(config: Dict[str, Any], symbol: str) -> str:
+    ws_url = (
+        config.get("data", {})
+        .get("urls", {})
+        .get("ws_stream", "wss://fstream.binance.com/stream")
+    )
+    safe_symbol = symbol.lower()
+    streams = [
+        f"{safe_symbol}@aggTrade",
+        f"{safe_symbol}@markPrice@1s",
+        f"{safe_symbol}@depth5@100ms",
+    ]
+    return f"{ws_url}?streams={'/'.join(streams)}"
+
+
+def _normalize_market_ws_event(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalize Binance combined stream events for the browser market tape."""
+    stream = str(payload.get("stream", ""))
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return None
+
+    received_at = datetime.now(timezone.utc)
+    event_time_ms = data.get("E") or data.get("T")
+    event_time = None
+    latency_ms = None
+    if event_time_ms is not None:
+        try:
+            event_dt = datetime.fromtimestamp(
+                int(event_time_ms) / 1000, tz=timezone.utc
+            )
+            event_time = event_dt.isoformat()
+            latency_ms = max(0.0, (received_at - event_dt).total_seconds() * 1000.0)
+        except (TypeError, ValueError, OSError):
+            event_time = None
+
+    if "@markPrice" in stream or data.get("e") == "markPriceUpdate":
+        price = data.get("p") or data.get("markPrice")
+        if price is None:
+            return None
+        return {
+            "type": "mark",
+            "symbol": str(data.get("s", "")).upper(),
+            "price": float(price),
+            "mark_price": float(price),
+            "event_time": event_time,
+            "received_at": received_at.isoformat(),
+            "latency_ms": latency_ms,
+            "source": "binance_ws",
+        }
+
+    if "@aggTrade" in stream or data.get("e") == "aggTrade":
+        price = data.get("p")
+        qty = data.get("q")
+        if price is None:
+            return None
+        return {
+            "type": "trade",
+            "symbol": str(data.get("s", "")).upper(),
+            "price": float(price),
+            "quantity": float(qty or 0.0),
+            "is_buyer_maker": bool(data.get("m", False)),
+            "event_time": event_time,
+            "received_at": received_at.isoformat(),
+            "latency_ms": latency_ms,
+            "source": "binance_ws",
+        }
+
+    if "@depth" in stream or data.get("e") == "depthUpdate":
+        bids = data.get("b") or data.get("bids") or []
+        asks = data.get("a") or data.get("asks") or []
+        best_bid = float(bids[0][0]) if bids else None
+        best_ask = float(asks[0][0]) if asks else None
+        mid = (
+            (best_bid + best_ask) / 2.0
+            if best_bid is not None and best_ask is not None
+            else None
+        )
+        return {
+            "type": "depth",
+            "symbol": str(data.get("s", "")).upper(),
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "mid_price": mid,
+            "spread_bps": (
+                ((best_ask - best_bid) / mid) * 10000.0
+                if mid and best_bid is not None and best_ask is not None
+                else None
+            ),
+            "event_time": event_time,
+            "received_at": received_at.isoformat(),
+            "latency_ms": latency_ms,
+            "source": "binance_ws",
+        }
+    return None
 
 
 def _read_jsonl(path: str | Path) -> list[Dict[str, Any]]:
@@ -394,6 +497,119 @@ def status():
 def control_state():
     """Recorded operator command state for the terminal control deck."""
     return _load_control_state()
+
+
+@app.get("/ops/workflow")
+def ops_workflow():
+    """Guided operator workflow so startup is visible from one cockpit view."""
+    config = get_config()
+    runtime = status()
+    registry = ModelRegistry()
+    processes = PROCESS_MANAGER.list_processes()
+    readiness = _production_readiness(registry)
+    active_shadow = registry.registry_data.get("active_shadow")
+    active_prod = registry.registry_data.get("active_prod")
+    paper_running = processes["paper"]["running"]
+    training_running = processes["training"]["running"]
+    steps = [
+        {
+            "id": "cockpit",
+            "label": "Open cockpit",
+            "status": "ready",
+            "command": ("python -m src.ops.cockpit " "--paper"),
+        },
+        {
+            "id": "paper",
+            "label": "Run paper trading",
+            "status": "running" if paper_running else "idle",
+            "action": "start-paper",
+        },
+        {
+            "id": "train",
+            "label": "Train or retrain model",
+            "status": "running" if training_running else "idle",
+            "action": "start-training",
+        },
+        {
+            "id": "shadow",
+            "label": "Collect shadow evidence",
+            "status": "ready" if active_shadow else "blocked",
+            "model_id": active_shadow,
+        },
+        {
+            "id": "prod",
+            "label": "Promote only reviewed PROD model",
+            "status": "ready" if readiness.get("ready") else "blocked",
+            "model_id": active_prod,
+            "blockers": readiness.get("blockers", []),
+        },
+    ]
+    return {
+        "title": "APEX Guided Operator Workflow",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "operator_mode": runtime.get("operator_mode"),
+        "symbol": runtime.get("symbol")
+        or config.get("data", {}).get("target_symbol", "ETHUSDC"),
+        "api": {
+            "host": os.getenv("APEX_API_HOST", "127.0.0.1"),
+            "port": int(os.getenv("APEX_API_PORT", "8080")),
+            "status_ws_interval_sec": float(
+                _api_cfg(config).get("status_ws_interval_sec", 0.5)
+            ),
+        },
+        "processes": processes,
+        "registry": {
+            "active_prod": active_prod,
+            "active_shadow": active_shadow,
+            "production_ready": readiness.get("ready", False),
+            "blockers": readiness.get("blockers", []),
+        },
+        "steps": steps,
+        "recommended_next": [
+            "Start paper from the cockpit if it is idle.",
+            "Train only after DuckDB has enough OHLCV history.",
+            "Keep candidate models in shadow until promotion gates pass.",
+            "Do not request live mode until PROD readiness and paper gate clear.",
+        ],
+    }
+
+
+@app.get("/ops/processes")
+def ops_processes():
+    """Local allow-listed paper/training subprocess status."""
+    return {
+        "processes": PROCESS_MANAGER.list_processes(),
+        "allowed": sorted(PROCESS_MANAGER.SPECS),
+    }
+
+
+@app.post("/ops/processes/{process_name}")
+def ops_process_action(process_name: str, payload: Optional[Dict[str, Any]] = None):
+    """Start or stop allow-listed local operator processes."""
+    body = payload or {}
+    if not body.get("confirm"):
+        raise HTTPException(status_code=400, detail="confirm=true is required")
+    action = body.get("action")
+    dry_run = bool(body.get("dry_run", False))
+    try:
+        if action == "start":
+            result = PROCESS_MANAGER.start(process_name, dry_run=dry_run)
+        elif action == "stop":
+            result = PROCESS_MANAGER.stop(process_name, dry_run=dry_run)
+        else:
+            raise HTTPException(status_code=400, detail="action must be start/stop")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="unknown process") from None
+
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "command": f"process-{action}",
+        "reason": body.get("reason", ""),
+        "payload": {"process": process_name, "dry_run": dry_run},
+        "state_after": result,
+    }
+    _append_audit(event)
+    return {"accepted": True, "effect": "local_process_control", **event}
 
 
 @app.post("/control/{command}")
@@ -1079,13 +1295,61 @@ async def ws_status(websocket: WebSocket):
     """Push operator status snapshots for the terminal."""
     await websocket.accept()
     store = get_status_store()
+    config = get_config()
+    interval = float(_api_cfg(config).get("status_ws_interval_sec", 0.5))
     try:
         while True:
             payload = store.snapshot()
             await websocket.send_json(payload)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(max(0.1, interval))
     except WebSocketDisconnect:
         logger.info("Status websocket disconnected")
+
+
+@app.websocket("/ws/market")
+async def ws_market(websocket: WebSocket):
+    """Direct low-latency market stream for the cockpit live price chart."""
+    await websocket.accept()
+    config = get_config()
+    symbol = (
+        websocket.query_params.get("symbol")
+        or config.get("data", {}).get("target_symbol", "ETHUSDC")
+    ).upper()
+    timeout = float(_api_cfg(config).get("market_ws_timeout_sec", 15.0))
+    stream_url = _market_stream_url(config, symbol)
+    try:
+        async with websockets.connect(
+            stream_url,
+            ping_interval=20,
+            ping_timeout=10,
+            max_queue=32,
+        ) as upstream:
+            await websocket.send_json(
+                {
+                    "type": "connected",
+                    "symbol": symbol,
+                    "source": "binance_ws",
+                    "received_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            while True:
+                raw = await asyncio.wait_for(upstream.recv(), timeout=timeout)
+                payload = _normalize_market_ws_event(json.loads(raw))
+                if payload and payload.get("symbol") in {"", symbol}:
+                    await websocket.send_json(payload)
+    except WebSocketDisconnect:
+        logger.info("Market websocket disconnected")
+    except Exception as exc:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "symbol": symbol,
+                "source": "binance_ws",
+                "message": str(exc),
+                "received_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        await websocket.close()
 
 
 def main():
@@ -1098,7 +1362,7 @@ def main():
     uvicorn.run(
         "src.api.server:app",
         host=os.getenv("APEX_API_HOST", "127.0.0.1"),
-        port=8080,
+        port=int(os.getenv("APEX_API_PORT", "8080")),
         reload=False,
     )
 

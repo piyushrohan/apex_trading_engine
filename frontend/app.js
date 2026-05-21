@@ -11,6 +11,7 @@
     "History",
     "Risk",
     "Ops",
+    "Runbook",
     "Logs",
   ];
   const ACTION_LABELS = ["SHORT", "FLAT", "LONG"];
@@ -71,6 +72,29 @@
     return Object.keys(lanes).filter((lane) => lanes[lane]?.active);
   }
 
+  function tickPrice(tick) {
+    const value = tick?.price ?? tick?.mark_price ?? tick?.mid_price;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function appendMarketTick(rows, tick) {
+    const price = tickPrice(tick);
+    if (!Number.isFinite(price)) return rows || [];
+    const normalized = {
+      ...tick,
+      price,
+      received_at: tick.received_at || new Date().toISOString(),
+    };
+    const next = [...(rows || []), normalized];
+    return next.slice(-360);
+  }
+
+  function latestMarketTick(rows) {
+    const candidates = (rows || []).filter((row) => Number.isFinite(tickPrice(row)));
+    return candidates.length ? candidates[candidates.length - 1] : null;
+  }
+
   async function getJson(url, fallback = null) {
     const response = await fetch(url);
     if (!response.ok) return fallback;
@@ -114,6 +138,10 @@
       promotion: null,
       drift: null,
       readiness: null,
+      workflow: null,
+      processes: { processes: {} },
+      marketTicks: [],
+      marketWsState: "connecting",
       logs: { files: [] },
       audit: { items: [], total: 0 },
       controls: null,
@@ -149,6 +177,8 @@
           promotion,
           drift,
           readiness,
+          workflow,
+          processes,
           logs,
           audit,
           controls,
@@ -174,6 +204,8 @@
           getJson(`${apiBase}/models/promotion/status`, null),
           getJson(`${apiBase}/models/drift`, null),
           getJson(`${apiBase}/ops/readiness`, null),
+          getJson(`${apiBase}/ops/workflow`, null),
+          getJson(`${apiBase}/ops/processes`, { processes: {} }),
           getJson(`${apiBase}/logs/runtime?limit=80`, { files: [] }),
           getJson(`${apiBase}/audit?limit=80`, { items: [], total: 0 }),
           getJson(`${apiBase}/control/state`, null),
@@ -195,6 +227,8 @@
           promotion,
           drift,
           readiness,
+          workflow,
+          processes,
           logs,
           audit,
           controls,
@@ -229,8 +263,32 @@
       }
     }
 
+    async function sendProcessAction(processName, action, extra = {}) {
+      try {
+        const result = await postJson(`${apiBase}/ops/processes/${processName}`, {
+          confirm: true,
+          action,
+          reason,
+          ...extra,
+        });
+        setState((current) => ({
+          ...current,
+          audit: {
+            ...current.audit,
+            items: [result, ...(current.audit?.items || [])],
+            total: (current.audit?.total || 0) + 1,
+          },
+          error: "",
+        }));
+        await hydrate();
+      } catch (err) {
+        setState((current) => ({ ...current, error: String(err) }));
+      }
+    }
+
     function requestCommand(command, extra = {}) {
       const staged = {
+        kind: "control",
         command,
         extra,
         label: commandLabel(command, extra),
@@ -242,11 +300,25 @@
       sendCommand(command, extra);
     }
 
+    function requestProcessAction(processName, action) {
+      setPendingCommand({
+        kind: "process",
+        processName,
+        command: action,
+        extra: { process: processName },
+        label: `${action === "start" ? "Start" : "Stop"} ${processName}`,
+      });
+    }
+
     async function confirmPendingCommand() {
       if (!pendingCommand) return;
       const staged = pendingCommand;
       setPendingCommand(null);
-      await sendCommand(staged.command, staged.extra);
+      if (staged.kind === "process") {
+        await sendProcessAction(staged.processName, staged.command, staged.extra);
+      } else {
+        await sendCommand(staged.command, staged.extra);
+      }
     }
 
     useEffect(() => {
@@ -273,6 +345,13 @@
             ...current,
             status: msg,
             explain: msg.last_explanation || current.explain,
+            marketTicks: appendMarketTick(current.marketTicks, {
+              type: "status",
+              symbol: msg.symbol,
+              price: msg.mark_price,
+              received_at: msg.updated_at,
+              source: "status_ws",
+            }),
             refreshedAt: new Date().toISOString(),
           }));
         } catch (err) {
@@ -281,6 +360,35 @@
       };
       return () => ws.close();
     }, [apiBase]);
+
+    useEffect(() => {
+      const wsUrl = apiBase.replace("http://", "ws://").replace("https://", "wss://");
+      const symbol = state.status?.symbol || "ETHUSDC";
+      const ws = new WebSocket(`${wsUrl}/ws/market?symbol=${encodeURIComponent(symbol)}`);
+      ws.onopen = () => setState((current) => ({ ...current, marketWsState: "live" }));
+      ws.onclose = () => setState((current) => ({ ...current, marketWsState: "offline" }));
+      ws.onerror = () => setState((current) => ({ ...current, marketWsState: "error" }));
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === "error") {
+            setState((current) => ({
+              ...current,
+              marketWsState: "error",
+              error: msg.message || current.error,
+            }));
+            return;
+          }
+          setState((current) => ({
+            ...current,
+            marketTicks: appendMarketTick(current.marketTicks, msg),
+          }));
+        } catch (err) {
+          setState((current) => ({ ...current, error: String(err) }));
+        }
+      };
+      return () => ws.close();
+    }, [apiBase, state.status?.symbol]);
 
     return h(
       "main",
@@ -334,6 +442,9 @@
         : null,
       activeTab === "Risk" ? h(RiskView, { state }) : null,
       activeTab === "Ops" ? h(OpsView, { state }) : null,
+      activeTab === "Runbook"
+        ? h(RunbookView, { state, requestProcessAction })
+        : null,
       activeTab === "Logs" ? h(LogsView, { state }) : null,
       h(ConfirmCommandModal, {
         pendingCommand,
@@ -372,6 +483,10 @@
           label: state.wsState === "live" ? "WS live" : `WS ${state.wsState}`,
           tone: state.wsState === "live" ? "ok" : "warn",
         }),
+        h(StatusPill, {
+          label: state.marketWsState === "live" ? "market live" : `market ${state.marketWsState}`,
+          tone: state.marketWsState === "live" ? "ok" : "warn",
+        }),
         h(StatusPill, { label: mode.toUpperCase(), tone: mode === "live" ? "warn" : "ok" }),
         h(StatusPill, {
           label: readiness?.summary?.live_ready ? "PROD ready" : "PROD blocked",
@@ -402,6 +517,7 @@
     const portfolio = state.portfolio?.runtime || status.portfolio || {};
     const controls = state.controls || {};
     const lanes = activeKillLanes(status);
+    const latestTick = latestMarketTick(state.marketTicks);
     return h(
       "section",
       { className: "layout two-one" },
@@ -412,13 +528,22 @@
           h(KpiGrid, {
             items: [
               ["Regime", status.regime || "-"],
-              ["Mark", num(status.mark_price, 2)],
+              ["Mark", num(latestTick?.price || status.mark_price, 2)],
+              ["Tick Age", ago(latestTick?.received_at)],
+              ["Tick Source", latestTick?.source || "-"],
               ["Kill Switch", status.kill_switch_active ? "ACTIVE" : "SAFE"],
               ["Active Lanes", lanes.length ? lanes.join(", ") : "none"],
               ["Ingestion", status.ingestion_enabled ? "ON" : "OFF"],
               ["Hedge", status.hedge_enabled ? "ON" : "OFF"],
               ["Updated", ago(status.updated_at)],
             ],
+          })
+        ),
+        h(Panel, { title: "Live Price Tape" },
+          h(LivePriceChart, { ticks: state.marketTicks }),
+          h(Table, {
+            rows: state.marketTicks.slice(-12).reverse(),
+            columns: ["received_at", "type", "price", "mid_price", "spread_bps", "latency_ms", "source"],
           })
         ),
         h(Panel, { title: "Position Book" },
@@ -910,6 +1035,78 @@
     );
   }
 
+  function RunbookView({ state, requestProcessAction }) {
+    const workflow = state.workflow || {};
+    const processes = state.processes?.processes || workflow.processes || {};
+    const steps = workflow.steps || [];
+    return h(
+      "section",
+      { className: "stack" },
+      h(
+        "div",
+        { className: "layout one-one" },
+        h(Panel, { title: "Guided Startup" },
+          h(KpiGrid, {
+            items: [
+              ["Mode", workflow.operator_mode || "-"],
+              ["Symbol", workflow.symbol || "-"],
+              ["API Port", workflow.api?.port ?? "-"],
+              ["WS Interval", workflow.api?.status_ws_interval_sec ?? "-"],
+              ["Active Prod", workflow.registry?.active_prod || "-"],
+              ["Active Shadow", workflow.registry?.active_shadow || "-"],
+            ],
+          }),
+          h(Table, {
+            rows: steps,
+            columns: ["id", "label", "status", "model_id", "action"],
+          })
+        ),
+        h(Panel, { title: "Local Process Controls", accent: "warn" },
+          h(
+            "div",
+            { className: "process-grid" },
+            ...Object.keys(processes).map((name) => {
+              const proc = processes[name] || {};
+              return h(
+                "div",
+                { className: "process-card", key: name },
+                h("div", { className: "process-title" }, name),
+                h(StatusPill, {
+                  label: proc.running ? `running pid ${proc.pid}` : "stopped",
+                  tone: proc.running ? "ok" : "neutral",
+                }),
+                h("p", { className: "muted" }, proc.description || "-"),
+                h("div", { className: "muted" }, proc.log_path || "-"),
+                h(
+                  "div",
+                  { className: "inline-controls" },
+                  h("button", {
+                    disabled: proc.running,
+                    onClick: () => requestProcessAction(name, "start"),
+                  }, `Start ${name}`),
+                  h("button", {
+                    disabled: !proc.running,
+                    className: "danger-button",
+                    onClick: () => requestProcessAction(name, "stop"),
+                  }, `Stop ${name}`)
+                )
+              );
+            })
+          )
+        )
+      ),
+      h(Panel, { title: "Recommended Next" },
+        h(
+          "ol",
+          { className: "action-list" },
+          ...(workflow.recommended_next || []).map((item, idx) =>
+            h("li", { key: idx }, item)
+          )
+        )
+      )
+    );
+  }
+
   function LogsView({ state }) {
     const logFiles = state.logs?.files || [];
     const audit = state.audit?.items || [];
@@ -1060,6 +1257,54 @@
         "svg",
         { className: "sparkline", viewBox: `0 0 ${width} ${height}`, role: "img" },
         h("polyline", { points, fill: "none", strokeWidth: "3" })
+      )
+    );
+  }
+
+  function LivePriceChart({ ticks }) {
+    const values = (ticks || [])
+      .map((row) => ({
+        price: tickPrice(row),
+        received_at: row.received_at,
+        latency_ms: Number(row.latency_ms),
+      }))
+      .filter((row) => Number.isFinite(row.price));
+    if (values.length < 2) {
+      return h("div", { className: "empty-chart" }, "Live price: waiting for ticks");
+    }
+    const width = 680;
+    const height = 210;
+    const min = Math.min(...values.map((row) => row.price));
+    const max = Math.max(...values.map((row) => row.price));
+    const span = max - min || 1;
+    const xFor = (idx) => (idx / Math.max(1, values.length - 1)) * width;
+    const yFor = (price) => height - ((price - min) / span) * (height - 18) - 9;
+    const points = values
+      .map((row, index) => `${xFor(index).toFixed(1)},${yFor(row.price).toFixed(1)}`)
+      .join(" ");
+    const latest = values[values.length - 1];
+    const latency = Number.isFinite(latest.latency_ms)
+      ? `${num(latest.latency_ms, 1)}ms latency`
+      : "latency unknown";
+    return h(
+      "div",
+      { className: "chart-wrap live-chart-wrap" },
+      h(
+        "div",
+        { className: "chart-label live-chart-label" },
+        h("span", null, `Live ${num(latest.price, 2)}`),
+        h("span", null, `${values.length} ticks | ${latency}`)
+      ),
+      h(
+        "svg",
+        { className: "sparkline live-price-chart", viewBox: `0 0 ${width} ${height}`, role: "img" },
+        h("polyline", { points, fill: "none", strokeWidth: "3" }),
+        h("circle", {
+          className: "latest-price-dot",
+          cx: xFor(values.length - 1),
+          cy: yFor(latest.price),
+          r: 6,
+        })
       )
     );
   }

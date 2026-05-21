@@ -1,5 +1,6 @@
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -56,11 +57,16 @@ class AutoRetrainPipeline:
                 self.registry = ModelRegistry()
         self.tracker = tracker or ExperimentTracker.from_config(config)
         self.evaluator = ModelEvaluator(config)
-        self.cache = DuckDBCacheManager(
+        db_path = (
             config.get("data", {})
             .get("storage", {})
             .get("db_path", "data_lake/apex.duckdb")
         )
+        read_only = Path(db_path).exists()
+        try:
+            self.cache = DuckDBCacheManager(db_path, read_only=read_only)
+        except TypeError:
+            self.cache = DuckDBCacheManager(db_path)
 
     def execute_nightly_retrain(self):
         """Main execution flow for the cron job."""

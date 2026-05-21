@@ -367,13 +367,38 @@ button:disabled {
   min-height: 180px;
 }
 
+.live-chart-wrap {
+  margin-top: 0;
+}
+
+.live-chart-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.live-price-chart {
+  min-height: 230px;
+}
+
+.live-price-chart polyline {
+  stroke: var(--accent-2);
+}
+
+.latest-price-dot {
+  fill: var(--accent);
+  stroke: #061018;
+  stroke-width: 2px;
+}
+
 .decision-dot {
   stroke: #061018;
   stroke-width: 2px;
 }
 
 .decision-dot-ok {
-  fill: var(--ok);
+  fill: var(--accent);
 }
 
 .decision-dot-warn {
@@ -420,6 +445,26 @@ button:disabled {
   display: grid;
   gap: 10px;
   color: #cdd9e2;
+}
+
+.process-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.process-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #1d2b36;
+  border-radius: 6px;
+  background: #0e151c;
+}
+
+.process-title {
+  font-size: 16px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .list-block li {

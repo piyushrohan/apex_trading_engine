@@ -171,6 +171,15 @@ class TradingPipeline:
                 active,
                 model_path,
             )
+        except Exception as exc:
+            self._model_artifact_loaded = False
+            logger.error(
+                "Active production model %s failed artifact safety checks at %s; "
+                "using defaults: %s",
+                active,
+                model_path,
+                exc,
+            )
         return active
 
     def _registry_production_readiness(

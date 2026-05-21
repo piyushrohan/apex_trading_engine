@@ -1,4 +1,7 @@
 import logging
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from src.models.gbm_agent import GBMAgent
@@ -37,10 +40,63 @@ class MetaController:
         if normalized == "PPO":
             self.ppo_agent.load(model_path)
         elif normalized in ("GBM", "LIGHTGBM"):
+            self._assert_gbm_artifact_safe(model_path)
             self.gbm_agent.load(model_path)
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
         return self
+
+    def _assert_gbm_artifact_safe(self, model_path: str) -> None:
+        """
+        Preflight native GBM artifacts in a child process before in-process load.
+
+        On macOS, some LightGBM artifacts can segfault when restored after Torch
+        has initialized. A subprocess lets the runtime quarantine that artifact
+        instead of crashing the paper/live operator process.
+        """
+        cfg = self.config.get("models", {}).get("gbm", {})
+        if not cfg.get("combined_runtime_preflight_enabled", True):
+            return
+
+        path = Path(model_path)
+        artifact = path if path.is_file() else path / "gbm_model.pkl"
+        if not artifact.exists():
+            return
+
+        timeout = float(cfg.get("artifact_preflight_timeout", 5.0))
+        code = (
+            "import sys\n"
+            "from src.models.ppo_agent import PPOAgent\n"
+            "from src.models.gbm_agent import GBMAgent\n"
+            "try:\n"
+            "    cfg = {'models': {'gbm': "
+            "{'combined_runtime_preflight_enabled': False}}}\n"
+            "    PPOAgent(state_dim=10, config=cfg)\n"
+            "    GBMAgent(cfg).load(sys.argv[1])\n"
+            "except Exception as exc:\n"
+            "    print(f'{type(exc).__name__}: {exc}', file=sys.stderr)\n"
+            "    sys.exit(2)\n"
+        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-X", "faulthandler", "-c", code, str(path)],
+                cwd=str(Path.cwd()),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"GBM artifact preflight timed out after {timeout:.1f}s: {artifact}"
+            ) from exc
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown_error"
+            raise RuntimeError(
+                "GBM artifact is unsafe in combined PPO/GBM runtime: "
+                f"{detail[-600:]}"
+            )
 
     def get_action(
         self, state_vector: list, regime_str: str

@@ -159,9 +159,13 @@ class ShadowLaneRunner:
 
         code = (
             "import sys\n"
+            "from src.models.ppo_agent import PPOAgent\n"
             "from src.models.gbm_agent import GBMAgent\n"
             "try:\n"
-            "    GBMAgent({}).load(sys.argv[1])\n"
+            "    cfg = {'models': {'gbm': "
+            "{'combined_runtime_preflight_enabled': False}}}\n"
+            "    PPOAgent(state_dim=10, config=cfg)\n"
+            "    GBMAgent(cfg).load(sys.argv[1])\n"
             "except Exception as exc:\n"
             "    print(f'{type(exc).__name__}: {exc}', file=sys.stderr)\n"
             "    sys.exit(2)\n"
@@ -171,7 +175,7 @@ class ShadowLaneRunner:
         )
         try:
             result = subprocess.run(
-                [sys.executable, "-c", code, str(path)],
+                [sys.executable, "-X", "faulthandler", "-c", code, str(path)],
                 cwd=str(Path.cwd()),
                 capture_output=True,
                 text=True,

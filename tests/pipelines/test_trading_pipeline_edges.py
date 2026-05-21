@@ -187,6 +187,12 @@ def test_load_active_prod_model_success_missing_artifact_and_unregistered():
     pipeline.meta_controller.load_model_artifact.side_effect = FileNotFoundError
     assert pipeline._load_active_prod_model() == "prod-v1"
 
+    pipeline.meta_controller.load_model_artifact.side_effect = RuntimeError(
+        "native artifact unsafe"
+    )
+    assert pipeline._load_active_prod_model() == "prod-v1"
+    assert pipeline._model_artifact_loaded is False
+
 
 @pytest.mark.unit
 def test_start_metrics_server_honors_enabled_flag(monkeypatch):
