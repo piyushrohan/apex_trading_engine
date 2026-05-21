@@ -362,6 +362,12 @@ pip install -r requirements-dev.txt
 pre-commit install
 ```
 
+For real LightGBM training on macOS, install the OpenMP runtime once:
+
+```bash
+brew install libomp
+```
+
 ### Optional Secret Setup
 
 Generate a Fernet master key:
@@ -600,7 +606,9 @@ Current learning is governed batch retraining:
 
 - GBM uses LightGBM when available, otherwise a deterministic centroid fallback.
 - PPO currently has a supervised warm-start training path, not full rollout PPO.
-- Labels come from future returns with `mlops.label_return_threshold`.
+- Labels come from next-bar future returns with `mlops.label_return_threshold`.
+- Training features are causal/current-bar features only; future returns are not
+  allowed as model inputs.
 - Candidate quality is judged through out-of-sample and stress gates.
 - Shadow lanes collect virtual evidence before production promotion.
 

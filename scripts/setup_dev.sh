@@ -19,6 +19,16 @@ else
     fi
 fi
 
+if [ "$(uname)" = "Darwin" ]; then
+    if command -v brew >/dev/null 2>&1; then
+        if ! brew --prefix libomp >/dev/null 2>&1; then
+            echo "⚠️  WARNING: libomp is not installed. Run 'brew install libomp' for real LightGBM training."
+        fi
+    else
+        echo "⚠️  WARNING: Homebrew is not installed. Install libomp manually for real LightGBM training."
+    fi
+fi
+
 echo "1. Creating Python Virtual Environment..."
 python3 -m venv venv
 source venv/bin/activate

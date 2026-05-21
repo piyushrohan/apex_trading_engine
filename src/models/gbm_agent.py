@@ -1,5 +1,6 @@
 import logging
 import pickle
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -87,6 +88,8 @@ class GBMAgent:
             "learning_rate": gbm_cfg.get("learning_rate", 0.05),
             "max_depth": gbm_cfg.get("max_depth", -1),
             "random_state": gbm_cfg.get("random_state", 42),
+            "n_jobs": gbm_cfg.get("n_jobs", 1),
+            "force_col_wise": gbm_cfg.get("force_col_wise", True),
             "verbosity": -1,
         }
         try:
@@ -116,7 +119,9 @@ class GBMAgent:
         self.model = self._build_model()
         self.model.fit(x_arr, y_arr)
         self.is_trained = True
-        train_probs = self.model.predict_proba(x_arr)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="X does not have valid feature")
+            train_probs = self.model.predict_proba(x_arr)
         accuracy = float((train_probs.argmax(axis=1) == y_arr).mean())
         return {
             "backend": self.backend,
@@ -158,7 +163,9 @@ class GBMAgent:
         Returns: (action, conviction_score, explainability_context)
         """
         state_arr = np.array([state_vector])
-        probs = self.model.predict_proba(state_arr)[0]
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="X does not have valid feature")
+            probs = self.model.predict_proba(state_arr)[0]
 
         action = int(probs.argmax())
         conviction = float(probs[action])

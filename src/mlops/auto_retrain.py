@@ -305,6 +305,7 @@ class AutoRetrainPipeline:
             .sub(close.ewm(span=15, adjust=False).mean())
             .div(close)
         )
+        threshold = self.config.get("mlops", {}).get("label_return_threshold", 0.0005)
 
         features = pd.DataFrame(
             {
@@ -314,16 +315,15 @@ class AutoRetrainPipeline:
                 "feature_0": returns,
                 "feature_1": volume_z,
                 "feature_2": returns.cumsum(),
-                "feature_3": (future_returns > 0.001).astype(float),
-                "feature_4": (future_returns < -0.001).astype(float),
+                "feature_3": (returns > threshold).astype(float),
+                "feature_4": (returns < -threshold).astype(float),
                 "feature_5": returns.rolling(5, min_periods=1).corr(volume).fillna(0),
-                "feature_6": future_returns.rolling(5, min_periods=1).mean(),
+                "feature_6": returns.rolling(5, min_periods=1).mean(),
                 "feature_7": high_low.fillna(0.0),
                 "feature_8": vol,
                 "feature_9": trend.fillna(0.0),
             }
         )
-        threshold = self.config.get("mlops", {}).get("label_return_threshold", 0.0005)
         features["label"] = np.select(
             [future_returns < -threshold, future_returns > threshold],
             [0, 2],

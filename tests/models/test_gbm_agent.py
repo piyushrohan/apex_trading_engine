@@ -82,6 +82,8 @@ def test_gbm_agent_training_validation_and_lightgbm_backend(monkeypatch, mock_co
     assert summary["backend"] == "lightgbm"
     assert summary["train_accuracy"] == 1.0
     assert agent.model.params["num_class"] == 3
+    assert agent.model.params["n_jobs"] == 1
+    assert agent.model.params["force_col_wise"] is True
 
 
 @pytest.mark.unit
